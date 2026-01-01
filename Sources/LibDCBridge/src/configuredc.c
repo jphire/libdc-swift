@@ -13,8 +13,8 @@
  * BLE stream structures
  *------------------------------------------------------------------*/
 typedef struct ble_stream_t {
-    dc_iostream_t base;      
-    ble_object_t *ble_object; 
+    dc_iostream_t base;
+    ble_object_t *ble_object;
 } ble_stream_t;
 
 /*--------------------------------------------------------------------
@@ -50,21 +50,26 @@ static const dc_iostream_vtable_t ble_iostream_vtable = {
 };
 
 /*--------------------------------------------------------------------
+ * Helper to print hex dumps for debugging
+ *------------------------------------------------------------------*/
+static void debug_hexdump(const char *prefix, const void *data, size_t size) {
+    const unsigned char *p = (const unsigned char *)data;
+    printf("DC_IO [%s] (%zu bytes): ", prefix, size);
+    for (size_t i = 0; i < size; i++) {
+        printf("%02X ", p[i]);
+    }
+    printf("\n");
+}
+
+/*--------------------------------------------------------------------
  * Creates a BLE iostream instance
- * 
- * @param out:     Output parameter for created iostream
- * @param context: Dive computer context
- * @param bleobj:  BLE object to associate with the stream
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
- * @note: Takes ownership of the bleobj
  *------------------------------------------------------------------*/
 static dc_status_t ble_iostream_create(dc_iostream_t **out, dc_context_t *context, ble_object_t *bleobj)
 {
     ble_stream_t *stream = (ble_stream_t *) malloc(sizeof(ble_stream_t));
     if (!stream) {
         if (context) {
-            printf("ble_iostream_create: no memory");
+            printf("ble_iostream_create: no memory\n");
         }
         return DC_STATUS_NOMEMORY;
     }
@@ -81,59 +86,48 @@ static dc_status_t ble_iostream_create(dc_iostream_t **out, dc_context_t *contex
 
 /*--------------------------------------------------------------------
  * Sets the timeout for BLE operations
- * 
- * @param iostream: The iostream instance
- * @param timeout:  Timeout value in milliseconds
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_set_timeout(dc_iostream_t *iostream, int timeout)
 {
+    // Uncomment to debug timeout changes, usually too verbose
+    // printf("DC_IO [TIMEOUT] Setting to %d ms\n", timeout);
     ble_stream_t *s = (ble_stream_t *) iostream;
     return ble_set_timeout(s->ble_object, timeout);
 }
 
 /*--------------------------------------------------------------------
  * Reads data from the BLE device
- * 
- * @param iostream: The iostream instance
- * @param data:     Buffer to store read data
- * @param size:     Size of the buffer
- * @param actual:   Output parameter for bytes actually read
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_read(dc_iostream_t *iostream, void *data, size_t size, size_t *actual)
 {
     ble_stream_t *s = (ble_stream_t *) iostream;
-    return ble_read(s->ble_object, data, size, actual);
+    dc_status_t rc = ble_read(s->ble_object, data, size, actual);
+    
+    // Log successful reads that contain data
+    if (rc == DC_STATUS_SUCCESS && actual && *actual > 0) {
+        debug_hexdump("READ", data, *actual);
+    } else if (rc != DC_STATUS_SUCCESS) {
+        // Log read errors (excluding normal timeouts if necessary, but good to see for now)
+        printf("DC_IO [READ] Error: %d\n", rc);
+    }
+    
+    return rc;
 }
 
 /*--------------------------------------------------------------------
  * Writes data to the BLE device
- * 
- * @param iostream: The iostream instance
- * @param data:     Data to write
- * @param size:     Size of the data
- * @param actual:   Output parameter for bytes actually written
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_write(dc_iostream_t *iostream, const void *data, size_t size, size_t *actual)
 {
+    // Log all writes
+    debug_hexdump("WRITE", data, size);
+    
     ble_stream_t *s = (ble_stream_t *) iostream;
     return ble_write(s->ble_object, data, size, actual);
 }
 
 /*--------------------------------------------------------------------
  * Performs device-specific control operations
- * 
- * @param iostream: The iostream instance
- * @param request:  Control request code
- * @param data_:    Request-specific data
- * @param size_:    Size of the data
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_ioctl(dc_iostream_t *iostream, unsigned int request, void *data_, size_t size_)
 {
@@ -143,27 +137,20 @@ static dc_status_t ble_stream_ioctl(dc_iostream_t *iostream, unsigned int reques
 
 /*--------------------------------------------------------------------
  * Suspends execution for specified duration
- * 
- * @param iostream:     The iostream instance
- * @param milliseconds: Duration to sleep in milliseconds
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_sleep(dc_iostream_t *iostream, unsigned int milliseconds)
 {
+    printf("DC_IO [SLEEP] %u ms\n", milliseconds);
     ble_stream_t *s = (ble_stream_t *) iostream;
     return ble_sleep(s->ble_object, milliseconds);
 }
 
 /*--------------------------------------------------------------------
  * Closes the BLE stream and frees resources
- * 
- * @param iostream: The iostream instance to close
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_close(dc_iostream_t *iostream)
 {
+    printf("DC_IO [CLOSE]\n");
     ble_stream_t *s = (ble_stream_t *) iostream;
     dc_status_t rc = ble_close(s->ble_object);
     freeBLEObject(s->ble_object);
@@ -173,13 +160,6 @@ static dc_status_t ble_stream_close(dc_iostream_t *iostream)
 
 /*--------------------------------------------------------------------
  * Opens a BLE packet connection to a dive computer
- * 
- * @param iostream: Output parameter for created iostream
- * @param context:  Dive computer context
- * @param devaddr:  BLE device address/UUID
- * @param userdata: User-provided context data
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, const char *devaddr, void *userdata) {
     // Initialize the Swift BLE manager singletons
@@ -212,13 +192,8 @@ dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, con
 
 /*--------------------------------------------------------------------
  * Event callback wrapper
- * 
- * @param device:   The dive computer device
- * @param event:    Type of event received
- * @param data:     Event-specific data
- * @param userdata: User-provided context (device_data_t pointer)
  *------------------------------------------------------------------*/
-static void event_cb(dc_device_t *device, dc_event_type_t event, const void *data, void *userdata)
+static void ble_device_event_cb(dc_device_t *device, dc_event_type_t event, const void *data, void *userdata)
 {
     device_data_t *devdata = (device_data_t *)userdata;
     if (!devdata) return;
@@ -247,7 +222,7 @@ static void event_cb(dc_device_t *device, dc_event_type_t event, const void *dat
                     dc_device_set_fingerprint(device, fingerprint, fsize);
                     devdata->fingerprint = fingerprint;
                     devdata->fsize = fsize;
-                } 
+                }
             }
         }
         break;
@@ -297,13 +272,6 @@ static void close_device_data(device_data_t *data) {
 
 /*--------------------------------------------------------------------
  * Opens a BLE device using a provided descriptor
- * 
- * @param data:       Pointer to device_data_t to store device info
- * @param devaddr:    BLE device address/UUID
- * @param descriptor: Device descriptor for the dive computer
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
- * @note: Takes ownership of the device_data_t structure
  *------------------------------------------------------------------*/
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_t family, unsigned int model) {
     dc_status_t rc;
@@ -349,7 +317,8 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 
     // Set up event handler
     unsigned int events = DC_EVENT_DEVINFO | DC_EVENT_PROGRESS | DC_EVENT_CLOCK;
-    rc = dc_device_set_events(data->device, events, event_cb, data);
+    // Updated to use the renamed callback function
+    rc = dc_device_set_events(data->device, events, ble_device_event_cb, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to set event handler, rc=%d\n", rc);
         close_device_data(data);
@@ -379,15 +348,8 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 
 /*--------------------------------------------------------------------
  * Helper function to find a matching device descriptor
- * 
- * @param out_descriptor: Output parameter for found descriptor
- * @param family:         Device family to match
- * @param model:          Device model to match
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
- * @note: Caller must free the returned descriptor when done
  *------------------------------------------------------------------*/
-dc_status_t find_descriptor_by_model(dc_descriptor_t **out_descriptor, 
+dc_status_t find_descriptor_by_model(dc_descriptor_t **out_descriptor,
     dc_family_t family, unsigned int model) {
     
     dc_iterator_t *iterator = NULL;
@@ -417,19 +379,9 @@ dc_status_t find_descriptor_by_model(dc_descriptor_t **out_descriptor,
 
 /*--------------------------------------------------------------------
  * Creates a dive data parser for a specific device model
- * 
- * @param parser:  Output parameter for created parser
- * @param context: Dive computer context
- * @param family:  Device family identifier
- * @param model:   Device model identifier
- * @param data:    Raw dive data to parse
- * @param size:    Size of raw dive data
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
- * @note: Caller must free the returned parser when done
  *------------------------------------------------------------------*/
-dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context, 
-    dc_family_t family, unsigned int model, const unsigned char *data, size_t size) 
+dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context,
+    dc_family_t family, unsigned int model, const unsigned char *data, size_t size)
 {
     dc_status_t rc;
     dc_descriptor_t *descriptor = NULL;
@@ -448,12 +400,6 @@ dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context
 
 /*--------------------------------------------------------------------
  * Helper function to find a matching BLE device descriptor by name
- * 
- * @param out_descriptor: Output parameter for found descriptor
- * @param name:          Device name to match
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
- * @note: Caller must free the returned descriptor when done
  *------------------------------------------------------------------*/
 struct name_pattern {
     const char *prefix;
@@ -480,9 +426,9 @@ static const struct name_pattern name_patterns[] = {
     { "NERD", "Shearwater", "NERD", MATCH_EXACT },
     { "Tern", "Shearwater", "Tern", MATCH_EXACT },
     
-    // Suunto dive computers 
+    // Suunto dive computers
     { "EON Steel", "Suunto", "EON Steel", MATCH_EXACT },
-    { "Suunto D5", "Suunto", "D5", MATCH_EXACT }, 
+    { "Suunto D5", "Suunto", "D5", MATCH_EXACT },
     { "EON Core", "Suunto", "EON Core", MATCH_EXACT },
     
     // Scubapro dive computers
@@ -517,7 +463,7 @@ static const struct name_pattern name_patterns[] = {
     { "OSTC 4-", "Heinrichs Weikamp", "OSTC 4", MATCH_EXACT },
     { "OSTC 2-", "Heinrichs Weikamp", "OSTC 2N", MATCH_EXACT },
     { "OSTC + ", "Heinrichs Weikamp", "OSTC 2", MATCH_EXACT },
-    { "OSTC", "Heinrichs Weikamp", "OSTC 2", MATCH_EXACT },  
+    { "OSTC", "Heinrichs Weikamp", "OSTC 2", MATCH_EXACT },
     
     // Deepblu dive computers
     { "COSMIQ", "Deepblu", "Cosmiq+", MATCH_EXACT },
@@ -551,7 +497,7 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
                 matches = (strstr(name, name_patterns[i].prefix) != NULL);
                 break;
             case MATCH_PREFIX:
-                matches = (strncmp(name, name_patterns[i].prefix, 
+                matches = (strncmp(name, name_patterns[i].prefix,
                     strlen(name_patterns[i].prefix)) == 0);
                 break;
             case MATCH_CONTAINS:
@@ -571,7 +517,7 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
                 const char *vendor = dc_descriptor_get_vendor(descriptor);
                 const char *product = dc_descriptor_get_product(descriptor);
 
-                if (vendor && product && 
+                if (vendor && product &&
                     strcmp(vendor, name_patterns[i].vendor) == 0 &&
                     strcmp(product, name_patterns[i].product) == 0) {
                     *out_descriptor = descriptor;
@@ -593,7 +539,7 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
     while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
         unsigned int transports = dc_descriptor_get_transports(descriptor);
         
-        if ((transports & DC_TRANSPORT_BLE) && 
+        if ((transports & DC_TRANSPORT_BLE) &&
             dc_descriptor_filter(descriptor, DC_TRANSPORT_BLE, name)) {
             *out_descriptor = descriptor;
             dc_iterator_free(iterator);
@@ -608,12 +554,6 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
 
 /*--------------------------------------------------------------------
  * Gets device family and model for a BLE device by name
- * 
- * @param name:   Device name to identify
- * @param family: Output parameter for device family
- * @param model:  Output parameter for device model
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
 dc_status_t get_device_info_from_name(const char *name, dc_family_t *family, unsigned int *model) {
     dc_descriptor_t *descriptor = NULL;
@@ -632,10 +572,6 @@ dc_status_t get_device_info_from_name(const char *name, dc_family_t *family, uns
 
 /*--------------------------------------------------------------------
  * Gets formatted display name for a device (vendor + product)
- * 
- * @param name: Device name to match
- * 
- * @return: Formatted display name string (caller must free), or NULL if not found
  *------------------------------------------------------------------*/
 char* get_formatted_device_name(const char *name) {
     dc_descriptor_t *descriptor = NULL;
@@ -664,18 +600,10 @@ char* get_formatted_device_name(const char *name) {
 
 /*--------------------------------------------------------------------
  * Helper function to open BLE device with stored or identified configuration
- * 
- * @param out_data: Output parameter for created device_data_t
- * @param name:     Device name to match
- * @param address:  BLE device address/UUID
- * @param stored_family: Optional stored device family (pass DC_FAMILY_NULL if none)
- * @param stored_model:  Optional stored device model (pass 0 if none)
- * 
- * @return: DC_STATUS_SUCCESS on success, error code otherwise
  *------------------------------------------------------------------*/
-dc_status_t open_ble_device_with_identification(device_data_t **out_data, 
+dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     const char *name, const char *address,
-    dc_family_t stored_family, unsigned int stored_model) 
+    dc_family_t stored_family, unsigned int stored_model)
 {
     device_data_t *data = (device_data_t*)calloc(1, sizeof(device_data_t));
     if (!data) return DC_STATUS_NOMEMORY;

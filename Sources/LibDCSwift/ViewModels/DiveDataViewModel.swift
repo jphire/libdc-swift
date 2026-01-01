@@ -350,4 +350,11 @@ public class DiveDataViewModel: ObservableObject {
             self.status = ""
         }
     }
-} 
+}
+
+/// Extension to convert Data to hexadecimal string representation
+extension Data {
+    public var hexString: String {
+        return map { String(format: "%02hhx", $0) }.joined()
+    }
+}

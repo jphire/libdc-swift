@@ -6,14 +6,13 @@ import LibDCBridge
 import UIKit
 #endif
 
-/// A class responsible for retrieving dive logs from connected dive computers.
-/// Handles the communication with the device, data parsing, and progress tracking.
 public class DiveLogRetriever {
     public class CallbackContext {
         var logCount: Int = 1
         let viewModel: DiveDataViewModel
         var lastFingerprint: Data?
         let deviceName: String
+        let deviceUUID: String
         var deviceSerial: String?
         var hasNewDives: Bool = false
         weak var bluetoothManager: CoreBluetoothManager?
@@ -22,23 +21,18 @@ public class DiveLogRetriever {
         var storedFingerprint: Data?
         var isCompleted: Bool = false
         
-        init(viewModel: DiveDataViewModel, deviceName: String, storedFingerprint: Data?, bluetoothManager: CoreBluetoothManager) {
+        var detectedFamily: dc_family_t = DC_FAMILY_NULL
+        var detectedModel: UInt32 = 0
+        
+        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: CoreBluetoothManager) {
             self.viewModel = viewModel
             self.deviceName = deviceName
+            self.deviceUUID = deviceUUID
             self.storedFingerprint = storedFingerprint
             self.bluetoothManager = bluetoothManager
         }
     }
 
-    /// C-compatible callback closure for processing individual dive logs.
-    /// This is called by libdivecomputer for each dive found on the device.
-    /// - Parameters:
-    ///   - data: Raw dive data
-    ///   - size: Size of the dive data
-    ///   - fingerprint: Unique identifier for the dive
-    ///   - fsize: Size of the fingerprint
-    ///   - userdata: Context data for the callback
-    /// - Returns: 1 if successful, 0 if failed
     private static let diveCallbackClosure: @convention(c) (
         UnsafePointer<UInt8>?,
         UInt32,
@@ -49,235 +43,226 @@ public class DiveLogRetriever {
         guard let data = data,
               let userdata = userdata,
               let fingerprint = fingerprint else {
-            logError("❌ diveCallback: Required parameters are nil")
             return 0
         }
         
         let context = Unmanaged<CallbackContext>.fromOpaque(userdata).takeUnretainedValue()
         
-        // Only check isRetrievingLogs because we're relying on clearRetrievalState
         if context.bluetoothManager?.isRetrievingLogs == false {
-            logInfo("🛑 Download cancelled - stopping enumeration")
-            return 0  // Stop enumeration
+            logInfo("🛑 Download cancelled")
+            return 0
         }
         
-        // Get device info if we don't have it yet
+        // 1. Capture Device Info (Once)
         if !context.hasDeviceInfo,
            let devicePtr = context.devicePtr,
            devicePtr.pointee.have_devinfo != 0 {
-            let deviceSerial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
-            context.deviceSerial = deviceSerial
+            context.deviceSerial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
+            context.detectedModel = devicePtr.pointee.devinfo.model
+            
+            if let desc = devicePtr.pointee.descriptor {
+                context.detectedFamily = dc_descriptor_get_type(desc)
+            }
+            
+            logInfo("📱 Detected Device Hardware - Family: \(context.detectedFamily), Model: \(context.detectedModel)")
+            
+            // Update storage if hardware tells us something different (e.g. 13 vs 9)
+            DeviceConfiguration.updateDeviceConfigurationFromHardware(
+                deviceAddress: context.deviceUUID,
+                deviceDataPtr: devicePtr,
+                deviceName: context.deviceName
+            )
+            
             context.hasDeviceInfo = true
         }
         
         let fingerprintData = Data(bytes: fingerprint, count: Int(fsize))
-        if context.logCount == 1 { // Given that first dive is the newest
+        
+        if context.logCount == 1 {
             context.lastFingerprint = fingerprintData
-            logInfo("📍 New fingerprint from latest dive: \(fingerprintData.hexString)")
         }
         
-        // Check fingerprint only if we have one stored
-        if let storedFingerprint = context.storedFingerprint {
-            if storedFingerprint == fingerprintData {
-                logInfo("✨ Found matching fingerprint - stopping enumeration")
-                return 0
+        if let storedFingerprint = context.storedFingerprint, storedFingerprint == fingerprintData {
+            logInfo("✨ Found matching fingerprint - download complete")
+            return 0
+        }
+        
+        // 4. Parse & Store Dive
+        var familyToUse: dc_family_t
+        var modelToUse: UInt32
+        
+        // PRIORITY ORDER FOR MODEL SELECTION:
+        // 1. Hardware Detection (Most reliable if available)
+        // 2. Stored/Forced Configuration (What the user selected)
+        // 3. Name-based Detection (Fallback)
+        
+        if context.detectedModel != 0 {
+            familyToUse = context.detectedFamily
+            modelToUse = context.detectedModel
+        } else if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID) {
+            familyToUse = stored.family.asDCFamily
+            modelToUse = stored.model
+            logInfo("ℹ️ Using Stored Configuration - Model: \(modelToUse)")
+        } else if let deviceInfo = DeviceConfiguration.fromName(context.deviceName) {
+            familyToUse = deviceInfo.family.asDCFamily
+            modelToUse = deviceInfo.model
+        } else {
+            logError("❌ Unknown device configuration")
+            return 0
+        }
+
+        guard let deviceFamily = DeviceConfiguration.DeviceFamily(dcFamily: familyToUse) else {
+            logError("❌ Failed to map C family ID \(familyToUse) to Swift DeviceFamily enum")
+            return 0
+        }
+
+        do {
+            let diveData = try GenericParser.parseDiveData(
+                family: deviceFamily,
+                model: modelToUse, 
+                diveNumber: context.logCount,
+                diveData: data,
+                dataSize: Int(size)
+            )
+            
+            DispatchQueue.main.async {
+                context.viewModel.appendDives([diveData])
+                context.viewModel.updateProgress(count: context.logCount)
             }
+            
+            context.hasNewDives = true
+            context.logCount += 1
+            return 1  
+        } catch {
+            logError("❌ Failed to parse dive #\(context.logCount): \(error)")
+            return 1 
         }
-        
-        // Always process dive when no fingerprint or no match found
-        if let deviceInfo = DeviceConfiguration.fromName(context.deviceName) {
-            do {
-                let diveData = try GenericParser.parseDiveData(
-                    family: deviceInfo.family,
-                    model: deviceInfo.model,
-                    diveNumber: context.logCount,
-                    diveData: data,
-                    dataSize: Int(size)
-                )
-                
-                DispatchQueue.main.async {
-                    context.viewModel.appendDives([diveData])
-                    context.viewModel.updateProgress(count: context.logCount)
-                    logInfo("✅ Parsed dive #\(context.logCount - 1)")
-                }
-                
-                context.hasNewDives = true
-                context.logCount += 1
-                return 1  
-            } catch {
-                logError("❌ Failed to parse dive #\(context.logCount): \(error)")
-                return 0
-            }
-        }
-        
-        return 1
     }
     
     #if os(iOS)
     private static var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     #endif
     
-    /// C callback for fingerprint lookup
     private static let fingerprintLookup: @convention(c) (
         UnsafeMutableRawPointer?, 
         UnsafePointer<CChar>?, 
         UnsafePointer<CChar>?, 
         UnsafeMutablePointer<Int>?
     ) -> UnsafeMutablePointer<UInt8>? = { context, deviceType, serial, size in
-        guard let context = context,
-              let deviceType = deviceType,
-              let serial = serial,
-              let size = size else {
-            logError("❌ Fingerprint lookup failed: Missing parameters")
-            return nil
-        }
+        guard let context = context, let size = size else { return nil }
         
         let viewModel = Unmanaged<DiveDataViewModel>.fromOpaque(context).takeUnretainedValue()
-        let deviceTypeStr = String(cString: deviceType)
-        var descriptor: OpaquePointer?
-        if find_descriptor_by_name(&descriptor, deviceTypeStr) == DC_STATUS_SUCCESS,
-           let desc = descriptor,
-           let product = dc_descriptor_get_product(desc) {
-            let normalizedDeviceType = String(cString: product)
-            dc_descriptor_free(desc)
-            if let fingerprint = viewModel.getFingerprint(
-                forDeviceType: normalizedDeviceType,
-                serial: String(cString: serial)
-            ) {
-                logInfo("✅ Found stored fingerprint: \(fingerprint.hexString)")
+        
+        if let serialStr = serial.map({ String(cString: $0) }),
+           let typeStr = deviceType.map({ String(cString: $0) }) {
+             let cleanName = DeviceConfiguration.getDeviceDisplayName(from: typeStr)
+             if let fingerprint = viewModel.getFingerprint(forDeviceType: cleanName, serial: serialStr) {
+                logInfo("✅ Found stored fingerprint")
                 size.pointee = fingerprint.count
                 let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: fingerprint.count)
                 fingerprint.copyBytes(to: buffer, count: fingerprint.count)
                 return buffer
             }
         }
-        logInfo("❌ No stored fingerprint found for \(deviceTypeStr) (\(String(cString: serial)))")
         return nil
     }
     
     private static var currentContext: CallbackContext?
     
-    /// Retrieves dive logs from a connected dive computer.
-    /// - Parameters:
-    ///   - devicePtr: Pointer to the device data structure
-    ///   - device: The CoreBluetooth peripheral representing the dive computer
-    ///   - viewModel: View model to update UI and store dive data
-    ///   - bluetoothManager: Reference to BLE manager
-    ///   - onProgress: Optional callback for progress updates
-    ///   - completion: Called when retrieval completes or fails
     public static func retrieveDiveLogs(
-        from devicePtr: UnsafeMutablePointer<device_data_t>,
-        device: CBPeripheral,
-        viewModel: DiveDataViewModel,
-        bluetoothManager: CoreBluetoothManager,
-        onProgress: ((Int, Int) -> Void)? = nil,
-        completion: @escaping (Bool) -> Void
-    ) {
-        let retrievalQueue = DispatchQueue(label: "com.libdcswift.retrieval", qos: .userInitiated)
-        
-        retrievalQueue.async {
-            // Reset only progress at start of new retrieval
-            DispatchQueue.main.async {
-                viewModel.resetProgress()
-            }
+            from devicePtr: UnsafeMutablePointer<device_data_t>,
+            device: CBPeripheral,
+            viewModel: DiveDataViewModel,
+            bluetoothManager: CoreBluetoothManager,
+            onProgress: ((Int, Int) -> Void)? = nil,
+            completion: @escaping (Bool) -> Void
+        ) {
+            let retrievalQueue = DispatchQueue(label: "com.libdcswift.retrieval", qos: .userInitiated)
             
-            guard let dcDevice = devicePtr.pointee.device else {
-                DispatchQueue.main.async {
-                    viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
-                    completion(false)
+            retrievalQueue.async {
+                DispatchQueue.main.async { viewModel.resetProgress() }
+                
+                guard let dcDevice = devicePtr.pointee.device else {
+                    DispatchQueue.main.async {
+                        viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
+                        completion(false)
+                    }
+                    return
                 }
-                return
-            }
 
-            // Get device info for fingerprint lookup
-            let deviceName = device.name ?? "Unknown Device"
-            let deviceSerial: String? = if devicePtr.pointee.have_devinfo != 0 {
-                String(format: "%08x", devicePtr.pointee.devinfo.serial)
-            } else {
-                nil
-            }
-            
-            // Only pass stored fingerprint if we want to use it (toggle is ON)
-            let storedFingerprint: Data? = if let serial = deviceSerial {
-                viewModel.getFingerprint(
-                    forDeviceType: deviceName,
-                    serial: serial
-                )
-            } else {
-                nil
-            }
-
-            // Clear device fingerprint if toggle is OFF
-            if storedFingerprint == nil {
+                let deviceName = device.name ?? "Unknown Device"
+                
+                // --- DEBUG: FORCE FULL DOWNLOAD ---
+                // We intentionally pass nil/0 to clear the fingerprint in the C library.
+                // This forces it to download ALL dives found in the manifest.
                 _ = dc_device_set_fingerprint(dcDevice, nil, 0)
-                logInfo("💡 No stored fingerprint - downloading all dives")
-            }
-
-            let context = CallbackContext(
-                viewModel: viewModel,
-                deviceName: deviceName,
-                storedFingerprint: storedFingerprint,
-                bluetoothManager: bluetoothManager
-            )
-            context.devicePtr = devicePtr
-            context.logCount = 1  
-            
-            let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
-            
-            let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-                if devicePtr.pointee.have_progress != 0 {
-                    onProgress?(
-                        Int(devicePtr.pointee.progress.current),
-                        Int(devicePtr.pointee.progress.maximum)
-                    )
+                
+                // NOTE: The original logic below is commented out to force the download.
+                /*
+                var storedFingerprint: Data? = nil
+                if devicePtr.pointee.have_devinfo != 0 {
+                    let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
+                    storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceName, serial: serial)
                 }
-            }
-            
-            devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
-            devicePtr.pointee.lookup_fingerprint = fingerprintLookup
-            
-            logInfo("🔄 Starting dive enumeration...")
-            let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
-            
-            progressTimer.invalidate()
-            DispatchQueue.main.async {
-                if enumStatus != DC_STATUS_SUCCESS {
-                    viewModel.setDetailedError("Download incomplete", status: enumStatus)
-                    completion(false)
-                } else {
-                    if context.hasNewDives {
-                        if let lastFingerprint = context.lastFingerprint,
-                           let deviceSerial = context.deviceSerial {
-                            viewModel.saveFingerprint(
-                                lastFingerprint,
-                                deviceType: context.deviceName,
-                                serial: deviceSerial
-                            )
-                            logInfo("💾 Updated fingerprint in persistent storage")
-                            viewModel.updateProgress(.completed)
-                            completion(true)
-                        }
-                    } else if context.storedFingerprint != nil {
-                        logInfo("✨ No new dives found since last download")
-                        viewModel.updateProgress(.noNewDives)
-                        completion(true)
-                    } else {
-                        viewModel.updateProgress(.completed)
-                        completion(true)
+
+                if storedFingerprint == nil {
+                    _ = dc_device_set_fingerprint(dcDevice, nil, 0)
+                }
+                */
+                // ----------------------------------
+
+                let context = CallbackContext(
+                    viewModel: viewModel,
+                    deviceName: deviceName,
+                    deviceUUID: device.identifier.uuidString,
+                    storedFingerprint: nil, // Pass nil so Swift doesn't stop early either
+                    bluetoothManager: bluetoothManager
+                )
+                context.devicePtr = devicePtr
+                
+                let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
+                
+                let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                    if devicePtr.pointee.have_progress != 0 {
+                        onProgress?(Int(devicePtr.pointee.progress.current), Int(devicePtr.pointee.progress.maximum))
                     }
                 }
                 
-                context.isCompleted = true
-                Unmanaged<CallbackContext>.fromOpaque(contextPtr).release()
+                devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
+                devicePtr.pointee.lookup_fingerprint = fingerprintLookup
                 
-                #if os(iOS)
-                endBackgroundTask()
-                #endif
+                logInfo("🔄 Starting dive enumeration (Force Full Download)...")
+                let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
+                
+                progressTimer.invalidate()
+                
+                DispatchQueue.main.async {
+                    if enumStatus != DC_STATUS_SUCCESS {
+                        viewModel.setDetailedError("Download incomplete", status: enumStatus)
+                        completion(false)
+                    } else {
+                        if context.hasNewDives, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
+                            viewModel.saveFingerprint(lastFP, deviceType: context.deviceName, serial: serial)
+                            viewModel.updateProgress(.completed)
+                        } else if context.storedFingerprint != nil {
+                            viewModel.updateProgress(.noNewDives)
+                        } else {
+                            viewModel.updateProgress(.completed)
+                        }
+                        completion(true)
+                    }
+                    
+                    context.isCompleted = true
+                    Unmanaged<CallbackContext>.fromOpaque(contextPtr).release()
+                    
+                    #if os(iOS)
+                    endBackgroundTask()
+                    #endif
+                }
+                
+                currentContext = context
             }
-            
-            currentContext = context
         }
-    }
     
     #if os(iOS)
     private static func endBackgroundTask() {
@@ -290,12 +275,5 @@ public class DiveLogRetriever {
     
     public static func getCurrentContext() -> CallbackContext? {
         return currentContext
-    }
-}
-
-/// Extension to convert Data to hexadecimal string representation
-extension Data {
-    var hexString: String {
-        return map { String(format: "%02hhx", $0) }.joined()
     }
 }

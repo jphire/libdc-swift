@@ -103,6 +103,23 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
 dc_status_t get_device_info_from_name(const char *name, dc_family_t *family, unsigned int *model);
 
 /**
+ * Gets all alternative models for a device name within the same family
+ * @param name: Device name to match
+ * @param family: Device family to search within
+ * @param models: Output array for model numbers (caller must free)
+ * @param model_count: Output parameter for number of models found
+ * @param max_models: Maximum number of models to return
+ * @return DC_STATUS_SUCCESS on success
+ */
+dc_status_t get_alternative_models_for_name(const char *name, dc_family_t family,
+    unsigned int *models, unsigned int *model_count, unsigned int max_models);
+
+/**
+ * Event callback for device events (used internally)
+ */
+void event_cb(dc_device_t *device, dc_event_type_t event, const void *data, void *userdata);
+
+/**
  * Gets formatted display name for a device
  * @param name: Device name to match
  * @return Formatted string "Vendor Product" (caller must free) or NULL
@@ -118,6 +135,16 @@ char* get_formatted_device_name(const char *name);
  * @return DC_STATUS_SUCCESS on success
  */
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, 
+    dc_family_t family, unsigned int model);
+
+/**
+ * Reopens a device with a different model, reusing the existing BLE connection
+ * @param data: Device data structure (must have valid context and iostream)
+ * @param family: Device family
+ * @param model: New model number to try
+ * @return DC_STATUS_SUCCESS on success
+ */
+dc_status_t reopen_ble_device_with_model(device_data_t *data, 
     dc_family_t family, unsigned int model);
 
 /**

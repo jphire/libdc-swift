@@ -4,9 +4,45 @@ import Clibdivecomputer
 import LibDCBridge
 
 @objc public class DeviceConfiguration: NSObject {
+    
+    // Helper struct for UI Selection
+    public struct ComputerModel: Identifiable, Hashable {
+        public let id = UUID()
+        public let name: String
+        public let family: DeviceFamily
+        public let modelID: UInt32
+        
+        public static func == (lhs: ComputerModel, rhs: ComputerModel) -> Bool {
+            return lhs.family == rhs.family && lhs.modelID == rhs.modelID
+        }
+        
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(family)
+            hasher.combine(modelID)
+        }
+    }
+    
+    // List of selectable models for the UI
+    public static let supportedModels: [ComputerModel] = [
+        ComputerModel(name: "Shearwater Peregrine", family: .shearwaterPetrel, modelID: 9),
+        ComputerModel(name: "Shearwater Peregrine TX", family: .shearwaterPetrel, modelID: 13),
+        ComputerModel(name: "Shearwater Petrel", family: .shearwaterPetrel, modelID: 3),
+        ComputerModel(name: "Shearwater Petrel 2", family: .shearwaterPetrel, modelID: 3),
+        ComputerModel(name: "Shearwater Petrel 3", family: .shearwaterPetrel, modelID: 10),
+        ComputerModel(name: "Shearwater Perdix", family: .shearwaterPetrel, modelID: 5),
+        ComputerModel(name: "Shearwater Perdix AI", family: .shearwaterPetrel, modelID: 6),
+        ComputerModel(name: "Shearwater Perdix 2", family: .shearwaterPetrel, modelID: 11),
+        ComputerModel(name: "Shearwater Teric", family: .shearwaterPetrel, modelID: 8),
+        ComputerModel(name: "Shearwater Tern", family: .shearwaterPetrel, modelID: 12),
+        ComputerModel(name: "Shearwater NERD 2", family: .shearwaterPetrel, modelID: 7),
+        ComputerModel(name: "Suunto EON Steel", family: .suuntoEonSteel, modelID: 0),
+        ComputerModel(name: "Suunto EON Core", family: .suuntoEonSteel, modelID: 0),
+        ComputerModel(name: "Suunto D5", family: .suuntoEonSteel, modelID: 0),
+        ComputerModel(name: "Scubapro G2", family: .uwatecSmart, modelID: 0),
+    ]
+
     /// Represents the family of dive computers that support BLE communication.
-    /// Only includes device families that have BLE-capable models.
-    public enum DeviceFamily: String, Codable {
+    public enum DeviceFamily: String, Codable, CaseIterable {
         case suuntoEonSteel
         case shearwaterPetrel
         case hwOstc3
@@ -23,7 +59,8 @@ import LibDCBridge
         case diveSystem
         
         /// Converts the Swift enum to libdivecomputer's dc_family_t type
-        var asDCFamily: dc_family_t {
+        // FIX: Added 'public' access modifier here
+        public var asDCFamily: dc_family_t {
             switch self {
             case .suuntoEonSteel: return DC_FAMILY_SUUNTO_EONSTEEL
             case .shearwaterPetrel: return DC_FAMILY_SHEARWATER_PETREL
@@ -43,8 +80,6 @@ import LibDCBridge
         }
         
         /// Creates a DeviceFamily instance from libdivecomputer's dc_family_t type
-        /// - Parameter dcFamily: The dc_family_t value to convert
-        /// - Returns: The corresponding DeviceFamily case, or nil if not supported
         init?(dcFamily: dc_family_t) {
             switch dcFamily {
             case DC_FAMILY_SUUNTO_EONSTEEL: self = .suuntoEonSteel
@@ -67,7 +102,6 @@ import LibDCBridge
     }
     
     /// Known BLE service UUIDs for supported dive computers.
-    /// Used for device discovery and identification.
     private static let knownServiceUUIDs: [CBUUID] = [
         CBUUID(string: "0000fefb-0000-1000-8000-00805f9b34fb"), // Heinrichs-Weikamp Telit/Stollmann
         CBUUID(string: "2456e1b9-26e2-8f83-e744-f34f01e9d701"), // Heinrichs-Weikamp U-Blox
@@ -81,21 +115,16 @@ import LibDCBridge
         CBUUID(string: "0000fcef-0000-1000-8000-00805f9b34fb")  // Divesoft Freedom
     ]
     
-    /// Returns an array of known BLE service UUIDs for supported dive computers.
-    /// - Returns: Array of CBUUIDs representing known service UUIDs
     public static func getKnownServiceUUIDs() -> [CBUUID] {
         return knownServiceUUIDs
     }
-    
+
     /// Attempts to open a BLE connection to a dive computer.
-    /// This function will try multiple methods to identify and connect to the device:
-    /// 1. Use stored device information if available
-    /// 2. Use descriptor system to identify device
-    /// - Parameters:
-    ///   - name: The advertised name of the BLE device
-    ///   - deviceAddress: The device's UUID/MAC address
-    /// - Returns: True if connection was successful, false otherwise
-    @objc public static func openBLEDevice(name: String, deviceAddress: String) -> Bool {
+    public static func openBLEDevice(
+        name: String,
+        deviceAddress: String,
+        forcedModel: (family: DeviceFamily, model: UInt32)? = nil
+    ) -> Bool {
         logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
         
         var deviceData: UnsafeMutablePointer<device_data_t>?
@@ -105,17 +134,45 @@ import LibDCBridge
             logDebug("Found stored device configuration - Family: \(storedDevice.family), Model: \(storedDevice.model)")
         }
         
+        // Determine which configuration to use: Forced > Stored > Default(0)
+        let familyToUse = forcedModel?.family.asDCFamily ?? storedDevice?.family.asDCFamily ?? DC_FAMILY_NULL
+        let modelToUse = forcedModel?.model ?? storedDevice?.model ?? 0
+        
+        if let forced = forcedModel {
+            logInfo("Using forced configuration: \(forced.family) Model: \(forced.model)")
+        }
+        
         let status = open_ble_device_with_identification(
             &deviceData,
             name,
             deviceAddress,
-            storedDevice?.family.asDCFamily ?? DC_FAMILY_NULL,
-            storedDevice?.model ?? 0
+            familyToUse,
+            modelToUse
         )
         
         if status == DC_STATUS_SUCCESS, let data = deviceData {
             logDebug("Successfully opened device")
             logDebug("Device data pointer allocated at: \(String(describing: data))")
+            
+            if let forced = forcedModel {
+                DeviceStorage.shared.storeDevice(
+                    uuid: deviceAddress,
+                    name: name,
+                    family: forced.family,
+                    model: forced.model
+                )
+            } else if storedDevice == nil {
+                // Initial save for a new auto-detected device
+                if let deviceInfo = fromName(name) {
+                    DeviceStorage.shared.storeDevice(
+                        uuid: deviceAddress,
+                        name: name,
+                        family: deviceInfo.family,
+                        model: deviceInfo.model
+                    )
+                }
+            }
+            
             DispatchQueue.main.async {
                 if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
                     manager.openedDeviceDataPtr = data
@@ -131,15 +188,46 @@ import LibDCBridge
         return false
     }
     
-    /// Identifies a BLE device from its name using libdivecomputer's descriptor system
-    /// - Parameter name: The device name to identify
-    /// - Returns: A tuple containing the device family and model number, or nil if not identified
+    // Updates stored device configuration with actual device info from hardware ID
+    public static func updateDeviceConfigurationFromHardware(
+        deviceAddress: String,
+        deviceDataPtr: UnsafeMutablePointer<device_data_t>,
+        deviceName: String
+    ) {
+        guard deviceDataPtr.pointee.have_devinfo != 0 else {
+            logDebug("Device info not yet available for \(deviceName)")
+            return
+        }
+        
+        let actualModel = deviceDataPtr.pointee.devinfo.model
+        
+        if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceAddress) {
+            if storedDevice.model != actualModel {
+                logInfo("🔄 Updating stored device model from \(storedDevice.model) to actual model \(actualModel) for \(deviceName)")
+                DeviceStorage.shared.storeDevice(
+                    uuid: deviceAddress,
+                    name: deviceName,
+                    family: storedDevice.family,
+                    model: actualModel
+                )
+            }
+        } else if let deviceInfo = fromName(deviceName) {
+            if deviceInfo.model != actualModel {
+                logInfo("🔄 Storing device with actual model \(actualModel) (name suggested \(deviceInfo.model)) for \(deviceName)")
+                DeviceStorage.shared.storeDevice(
+                    uuid: deviceAddress,
+                    name: deviceName,
+                    family: deviceInfo.family,
+                    model: actualModel
+                )
+            }
+        }
+    }
+    
     public static func fromName(_ name: String) -> (family: DeviceFamily, model: UInt32)? {
         var descriptor: OpaquePointer?
-        
         let rc = find_descriptor_by_name(&descriptor, name)
-        if rc == DC_STATUS_SUCCESS,
-           let desc = descriptor {
+        if rc == DC_STATUS_SUCCESS, let desc = descriptor {
             let family = dc_descriptor_get_type(desc)
             let model = dc_descriptor_get_model(desc)
             if let deviceFamily = DeviceFamily(dcFamily: family) {
@@ -151,10 +239,6 @@ import LibDCBridge
         return nil
     }
     
-    /// Returns a human-readable display name for a device using libdivecomputer's vendor and product information.
-    /// Only considers BLE-capable devices.
-    /// - Parameter name: The device name to get display name for
-    /// - Returns: A formatted string containing the vendor and product name, or the original name if not found
     public static func getDeviceDisplayName(from name: String) -> String {
         if let cString = get_formatted_device_name(name) {
             defer { free(cString) }
@@ -166,7 +250,6 @@ import LibDCBridge
     private var descriptor: OpaquePointer?
     private static var context: OpaquePointer?
     
-    /// Setup the shared device context
     public static func setupContext() {
         if context == nil {
             let rc = dc_context_new(&context)
@@ -176,7 +259,6 @@ import LibDCBridge
         }
     }
     
-    /// Cleanup the shared device context
     public static func cleanupContext() {
         if let ctx = context {
             dc_context_free(ctx)
@@ -184,12 +266,6 @@ import LibDCBridge
         }
     }
     
-    /// Creates a parser for dive data
-    /// - Parameters:
-    ///   - family: Device family
-    ///   - model: Device model
-    ///   - data: Raw dive data to parse
-    /// - Returns: Parser instance if successful, nil otherwise
     public static func createParser(family: dc_family_t, model: UInt32, data: Data) -> OpaquePointer? {
         guard let context = context else {
             logError("No dive computer context available")
