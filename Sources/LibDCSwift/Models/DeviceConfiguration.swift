@@ -59,7 +59,6 @@ import LibDCBridge
         case diveSystem
         
         /// Converts the Swift enum to libdivecomputer's dc_family_t type
-        // FIX: Added 'public' access modifier here
         public var asDCFamily: dc_family_t {
             switch self {
             case .suuntoEonSteel: return DC_FAMILY_SUUNTO_EONSTEEL

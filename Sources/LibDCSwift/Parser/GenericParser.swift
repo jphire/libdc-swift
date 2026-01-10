@@ -111,11 +111,28 @@ public class GenericParser {
         
         /// Adds a new profile point from current sample data
         func addProfilePoint() {
+            // Extract deco data
+            let ndl = data.deco?.type == DC_DECO_NDL ? data.deco?.time : nil
+            let decoStop = data.deco?.type == DC_DECO_DECOSTOP ? data.deco?.depth : nil
+            let decoTime = data.deco?.type == DC_DECO_DECOSTOP ? data.deco?.time : nil
+            let tts = data.deco?.tts
+
             let point = DiveProfilePoint(
                 time: data.time,
                 depth: data.depth,
                 temperature: data.temperature,
-                pressure: data.pressure.last?.value
+                pressure: data.pressure.last?.value,
+                po2: data.ppo2.last?.value,
+                ndl: ndl,
+                decoStop: decoStop,
+                decoTime: decoTime,
+                tts: tts,
+                currentGas: data.gasmix,
+                cns: data.cns,
+                rbt: data.rbt,
+                heartbeat: data.heartbeat,
+                bearing: data.bearing,
+                setpoint: data.setpoint
             )
             data.profile.append(point)
             
@@ -196,7 +213,7 @@ public class GenericParser {
         let rc = create_parser_for_device(&parser, context, family.asDCFamily, model, diveData, size_t(dataSize))
 
         guard rc == DC_STATUS_SUCCESS, parser != nil else {
-            logError("❌ Parser creation failed with status: \(rc)")
+            logError("Parser creation failed with status: \(rc)")
             throw ParserError.parserCreationFailed(rc)
         }
         
@@ -268,14 +285,29 @@ public class GenericParser {
                     break
                 }
                 
-                // Add the events to the current point
+                // Add the events to the current point with all available data
+                let ndl = wrapper.data.deco?.type == DC_DECO_NDL ? wrapper.data.deco?.time : nil
+                let decoStop = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.depth : nil
+                let decoTime = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.time : nil
+                let tts = wrapper.data.deco?.tts
+
                 let point = DiveProfilePoint(
                     time: wrapper.data.time,
                     depth: wrapper.data.depth,
                     temperature: wrapper.data.temperature,
                     pressure: wrapper.data.pressure.last?.value,
                     po2: wrapper.data.ppo2.last?.value,
-                    events: events
+                    events: events,
+                    ndl: ndl,
+                    decoStop: decoStop,
+                    decoTime: decoTime,
+                    tts: tts,
+                    currentGas: wrapper.data.gasmix,
+                    cns: wrapper.data.cns,
+                    rbt: wrapper.data.rbt,
+                    heartbeat: wrapper.data.heartbeat,
+                    bearing: wrapper.data.bearing,
+                    setpoint: wrapper.data.setpoint
                 )
                 wrapper.data.profile.append(point)
                 
@@ -324,6 +356,23 @@ public class GenericParser {
             throw ParserError.sampleProcessingFailed(samplesStatus)
         }
         
+        // Get gas mix information
+        if let gasmixCount: UInt32 = getField(parser, type: DC_FIELD_GASMIX_COUNT) {
+            logInfo("📊 Found \(gasmixCount) gas mixes")
+            for i in 0..<gasmixCount {
+                if let gasmix: dc_gasmix_t = getField(parser, type: DC_FIELD_GASMIX, flags: UInt32(i)) {
+                    let mix = GasMix(
+                        helium: gasmix.helium,
+                        oxygen: gasmix.oxygen,
+                        nitrogen: gasmix.nitrogen,
+                        usage: gasmix.usage
+                    )
+                    wrapper.data.gasMixes.append(mix)
+                    logInfo("  Gas Mix \(i): O2=\(gasmix.oxygen * 100)%, He=\(gasmix.helium * 100)%, N2=\(gasmix.nitrogen * 100)%")
+                }
+            }
+        }
+        
         // Get tank information
         if let tankCount: UInt32 = getField(parser, type: DC_FIELD_TANK_COUNT) {
             for i in 0..<tankCount {
@@ -339,7 +388,7 @@ public class GenericParser {
         if let decoModel: dc_decomodel_t = getField(parser, type: DC_FIELD_DECOMODEL) {
             wrapper.setDecoModel(decoModel)
         } else {
-            logInfo("❌ Failed to get decompression model field")
+            logInfo("Failed to get decompression model field")
         }
         
         // Get dive mode
@@ -381,7 +430,7 @@ public class GenericParser {
 
         // Get location if available
         if let location: dc_location_t = getField(parser, type: DC_FIELD_LOCATION) {
-            wrapper.data.location = Location(
+            wrapper.data.location = DiveData.Location(
                 latitude: location.latitude,
                 longitude: location.longitude,
                 altitude: location.altitude
@@ -413,6 +462,7 @@ public class GenericParser {
             tankPressure: wrapper.data.pressure.map { $0.value },
             gasMix: wrapper.data.gasmix,
             gasMixCount: wrapper.data.gasMixes.count,
+            gasMixes: wrapper.data.gasMixes.isEmpty ? nil : wrapper.data.gasMixes,
             salinity: wrapper.data.salinity,
             atmospheric: wrapper.data.atmospheric,
             surfaceTemperature: wrapper.data.tempSurface,

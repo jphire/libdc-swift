@@ -45,3 +45,5 @@ Package.resolved
 *.xcworkspace
 *.xcodeproj
 .swiftpm/
+
+Examples/

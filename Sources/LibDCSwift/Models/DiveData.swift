@@ -67,7 +67,23 @@ public struct DiveProfilePoint {
     public let pn2: Double?  // Nitrogen partial pressure
     public let phe: Double?  // Helium partial pressure
     public let events: [DiveEvent]
-    
+
+    // Deco data
+    public let ndl: UInt32?           // No-decompression limit (seconds)
+    public let decoStop: Double?      // Deco stop depth (meters)
+    public let decoTime: UInt32?      // Deco stop time (seconds)
+    public let tts: UInt32?           // Time to surface (seconds)
+
+    // Gas data
+    public let currentGas: Int?       // Current gas mix index
+    public let cns: Double?           // CNS oxygen tracking (percentage)
+
+    // Sensor data
+    public let rbt: UInt32?           // Remaining bottom time (minutes)
+    public let heartbeat: UInt32?     // Heart rate (bpm)
+    public let bearing: UInt32?       // Compass heading (degrees)
+    public let setpoint: Double?      // CCR setpoint
+
     public init(
         time: TimeInterval,
         depth: Double,
@@ -76,7 +92,17 @@ public struct DiveProfilePoint {
         po2: Double? = nil,
         pn2: Double? = nil,
         phe: Double? = nil,
-        events: [DiveEvent] = []
+        events: [DiveEvent] = [],
+        ndl: UInt32? = nil,
+        decoStop: Double? = nil,
+        decoTime: UInt32? = nil,
+        tts: UInt32? = nil,
+        currentGas: Int? = nil,
+        cns: Double? = nil,
+        rbt: UInt32? = nil,
+        heartbeat: UInt32? = nil,
+        bearing: UInt32? = nil,
+        setpoint: Double? = nil
     ) {
         self.time = time
         self.depth = depth
@@ -86,6 +112,16 @@ public struct DiveProfilePoint {
         self.pn2 = pn2
         self.phe = phe
         self.events = events
+        self.ndl = ndl
+        self.decoStop = decoStop
+        self.decoTime = decoTime
+        self.tts = tts
+        self.currentGas = currentGas
+        self.cns = cns
+        self.rbt = rbt
+        self.heartbeat = heartbeat
+        self.bearing = bearing
+        self.setpoint = setpoint
     }
 }
 
@@ -197,6 +233,7 @@ public struct DiveData: Identifiable {
     public var tankPressure: [Double]
     public var gasMix: Int?
     public var gasMixCount: Int?
+    public var gasMixes: [GasMix]?
     
     // Environmental data
     public var salinity: Double?
@@ -357,6 +394,7 @@ public struct DiveData: Identifiable {
         tankPressure: [Double],
         gasMix: Int?,
         gasMixCount: Int?,
+        gasMixes: [GasMix]?,
         salinity: Double?,
         atmospheric: Double?,
         surfaceTemperature: Double?,
@@ -385,6 +423,7 @@ public struct DiveData: Identifiable {
         self.tankPressure = tankPressure
         self.gasMix = gasMix
         self.gasMixCount = gasMixCount
+        self.gasMixes = gasMixes
         self.salinity = salinity
         self.atmospheric = atmospheric
         self.surfaceTemperature = surfaceTemperature

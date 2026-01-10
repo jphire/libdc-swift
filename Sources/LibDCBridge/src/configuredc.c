@@ -104,30 +104,30 @@ static dc_status_t ble_stream_read(dc_iostream_t *iostream, void *data, size_t s
     dc_status_t rc = ble_read(s->ble_object, data, size, actual);
 
     if (rc == DC_STATUS_SUCCESS && actual && *actual > 0) {
-        printf("DC_IO [READ_DEBUG] Requested: %zu, Received: %zu, Transport: %d\n",
-               size, *actual, iostream->transport);
-        debug_hexdump("READ", data, *actual);
+        // printf("DC_IO [READ_DEBUG] Requested: %zu, Received: %zu, Transport: %d\n",
+        //        size, *actual, iostream->transport);
+        // debug_hexdump("READ", data, *actual);
 
         // For BLE transport, show what would be processed after skipping header
         if (iostream->transport == DC_TRANSPORT_BLE && *actual >= 2) {
-            printf("DC_IO [READ_DEBUG] After BLE header skip (first 2 bytes):\n");
-            debug_hexdump("READ_AFTER_SKIP", (unsigned char*)data + 2, *actual - 2);
+            // printf("DC_IO [READ_DEBUG] After BLE header skip (first 2 bytes):\n");
+            // debug_hexdump("READ_AFTER_SKIP", (unsigned char*)data + 2, *actual - 2);
 
             // Show the expected packet structure
             unsigned char *packet = (unsigned char*)data;
             if (*actual >= 6) {
-                printf("DC_IO [READ_DEBUG] BLE Header: [0]=0x%02X [1]=0x%02X\n", packet[0], packet[1]);
-                printf("DC_IO [READ_DEBUG] SLIP Packet: [2]=0x%02X [3]=0x%02X [4]=0x%02X [5]=0x%02X\n",
-                       packet[2], packet[3], packet[4], packet[5]);
+                // printf("DC_IO [READ_DEBUG] BLE Header: [0]=0x%02X [1]=0x%02X\n", packet[0], packet[1]);
+                // printf("DC_IO [READ_DEBUG] SLIP Packet: [2]=0x%02X [3]=0x%02X [4]=0x%02X [5]=0x%02X\n",
+                //        packet[2], packet[3], packet[4], packet[5]);
 
                 // If this looks like a response packet (starts with 01 FF at offset 2)
                 if (packet[2] == 0x01 && packet[3] == 0xFF && *actual >= 7) {
                     unsigned int length = packet[4];
-                    printf("DC_IO [READ_DEBUG] Length field: 0x%02X (%u decimal)\n", length, length);
-                    printf("DC_IO [READ_DEBUG] Expected total size: %u (length-1+4) = %u\n",
-                           length, length - 1 + 4);
-                    printf("DC_IO [READ_DEBUG] Actual size after BLE skip: %zu\n", *actual - 2);
-                    printf("DC_IO [READ_DEBUG] Difference: %zd bytes\n", (*actual - 2) - (length - 1 + 4));
+                    // printf("DC_IO [READ_DEBUG] Length field: 0x%02X (%u decimal)\n", length, length);
+                    // printf("DC_IO [READ_DEBUG] Expected total size: %u (length-1+4) = %u\n",
+                    //        length, length - 1 + 4);
+                    // printf("DC_IO [READ_DEBUG] Actual size after BLE skip: %zu\n", *actual - 2);
+                    // printf("DC_IO [READ_DEBUG] Difference: %zd bytes\n", (*actual - 2) - (length - 1 + 4));
                 }
             }
         }
@@ -142,7 +142,7 @@ static dc_status_t ble_stream_read(dc_iostream_t *iostream, void *data, size_t s
 static dc_status_t ble_stream_write(dc_iostream_t *iostream, const void *data, size_t size, size_t *actual)
 {
     // Log all writes
-    debug_hexdump("WRITE", data, size);
+    // debug_hexdump("WRITE", data, size);
     
     ble_stream_t *s = (ble_stream_t *) iostream;
     return ble_write(s->ble_object, data, size, actual);
