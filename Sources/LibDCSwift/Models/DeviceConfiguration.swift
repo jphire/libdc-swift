@@ -125,22 +125,36 @@ import LibDCBridge
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
         logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
-        
+
         var deviceData: UnsafeMutablePointer<device_data_t>?
         let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceAddress)
-        
+
         if let storedDevice = storedDevice {
             logDebug("Found stored device configuration - Family: \(storedDevice.family), Model: \(storedDevice.model)")
         }
-        
-        // Determine which configuration to use: Forced > Stored > Default(0)
-        let familyToUse = forcedModel?.family.asDCFamily ?? storedDevice?.family.asDCFamily ?? DC_FAMILY_NULL
-        let modelToUse = forcedModel?.model ?? storedDevice?.model ?? 0
-        
+
+        // Determine which configuration to use: Forced > Stored > Auto-detect from name > Default(0)
+        let familyToUse: dc_family_t
+        let modelToUse: UInt32
+
         if let forced = forcedModel {
+            familyToUse = forced.family.asDCFamily
+            modelToUse = forced.model
             logInfo("Using forced configuration: \(forced.family) Model: \(forced.model)")
+        } else if let stored = storedDevice {
+            familyToUse = stored.family.asDCFamily
+            modelToUse = stored.model
+        } else if let detected = fromName(name) {
+            // Auto-detect from device name BEFORE opening
+            familyToUse = detected.family.asDCFamily
+            modelToUse = detected.model
+            logInfo("Auto-detected configuration from name '\(name)': \(detected.family) Model: \(detected.model)")
+        } else {
+            familyToUse = DC_FAMILY_NULL
+            modelToUse = 0
+            logWarning("⚠️ Could not determine device configuration for '\(name)', opening with defaults")
         }
-        
+
         let status = open_ble_device_with_identification(
             &deviceData,
             name,
@@ -148,11 +162,12 @@ import LibDCBridge
             familyToUse,
             modelToUse
         )
-        
+
         if status == DC_STATUS_SUCCESS, let data = deviceData {
             logDebug("Successfully opened device")
             logDebug("Device data pointer allocated at: \(String(describing: data))")
-            
+
+            // Store the configuration for future connections
             if let forced = forcedModel {
                 DeviceStorage.shared.storeDevice(
                     uuid: deviceAddress,
@@ -160,18 +175,15 @@ import LibDCBridge
                     family: forced.family,
                     model: forced.model
                 )
-            } else if storedDevice == nil {
-                // Initial save for a new auto-detected device
-                if let deviceInfo = fromName(name) {
-                    DeviceStorage.shared.storeDevice(
-                        uuid: deviceAddress,
-                        name: name,
-                        family: deviceInfo.family,
-                        model: deviceInfo.model
-                    )
-                }
+            } else if storedDevice == nil, let detected = fromName(name) {
+                DeviceStorage.shared.storeDevice(
+                    uuid: deviceAddress,
+                    name: name,
+                    family: detected.family,
+                    model: detected.model
+                )
             }
-            
+
             DispatchQueue.main.async {
                 if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
                     manager.openedDeviceDataPtr = data
@@ -179,12 +191,72 @@ import LibDCBridge
             }
             return true
         }
-        
+
         logError("Failed to open device (status: \(status))")
         if let data = deviceData {
             data.deallocate()
         }
         return false
+    }
+    
+    /// Fetches device info (serial, model, firmware) by starting and immediately stopping dive enumeration
+    /// This triggers the device to send its devinfo event without downloading any dives
+    public static func fetchDeviceInfo(
+        deviceDataPtr: UnsafeMutablePointer<device_data_t>,
+        completion: @escaping (Bool) -> Void
+    ) {
+        // Check if we already have device info
+        if deviceDataPtr.pointee.have_devinfo != 0 {
+            logDebug("Device info already available")
+            completion(true)
+            return
+        }
+        
+        guard let dcDevice = deviceDataPtr.pointee.device else {
+            logError("No device connection found")
+            completion(false)
+            return
+        }
+        
+        logInfo("📍 Fetching device info...")
+        
+        // Create a minimal callback that returns 0 immediately to stop enumeration
+        // This will trigger the device to send devinfo but won't download any dives
+        let minimalCallback: @convention(c) (
+            UnsafePointer<UInt8>?,
+            UInt32,
+            UnsafePointer<UInt8>?,
+            UInt32,
+            UnsafeMutableRawPointer?
+        ) -> Int32 = { _, _, _, _, _ in
+            // Return 0 to stop enumeration immediately
+            return 0
+        }
+        
+        let retrievalQueue = DispatchQueue(label: "com.libdcswift.deviceinfo", qos: .userInitiated)
+        retrievalQueue.async {
+            // Call dc_device_foreach with our minimal callback
+            // This will trigger DC_EVENT_DEVINFO but stop before downloading any dives
+            let status = dc_device_foreach(dcDevice, minimalCallback, nil)
+            
+            DispatchQueue.main.async {
+                if status == DC_STATUS_SUCCESS || status == DC_STATUS_PROTOCOL {
+                    // DC_STATUS_PROTOCOL is expected when we return 0 from callback
+                    if deviceDataPtr.pointee.have_devinfo != 0 {
+                        let serial = String(format: "%08x", deviceDataPtr.pointee.devinfo.serial)
+                        let model = deviceDataPtr.pointee.devinfo.model
+                        logInfo("✅ Device info fetched - Serial: \(serial), Model: \(model)")
+                        completion(true)
+                    } else {
+                        logWarning("⚠️ Device info not available after enumeration")
+                        completion(false)
+                    }
+                } else {
+                    logError("❌ Failed to fetch device info: \(status)")
+                    completion(false)
+                }
+            }
+        }
     }
     
     // Updates stored device configuration with actual device info from hardware ID

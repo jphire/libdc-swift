@@ -27,35 +27,11 @@ public class DeviceFingerprintStorage {
     private init() {}
     
     /// Normalizes a device type string for consistent comparison
-    /// Uses libdivecomputer's descriptor system when possible, falls back to string parsing
+    /// Since we now use stored device configuration, this just does simple case-insensitive matching
     /// - Parameter deviceType: The device type string to normalize
-    /// - Returns: Normalized device type string
+    /// - Returns: Normalized device type string (lowercased and trimmed)
     private func normalizeDeviceType(_ deviceType: String) -> String {
-        // Try to find matching descriptor from libdivecomputer
-        var descriptor: OpaquePointer?
-        let status = find_descriptor_by_name(&descriptor, deviceType)
-        
-        // If we found a matching descriptor, use its product name
-        if status == DC_STATUS_SUCCESS,
-           let desc = descriptor,
-           let product = dc_descriptor_get_product(desc) {
-            let normalizedName = String(cString: product)
-            dc_descriptor_free(desc)
-            return normalizedName
-        }
-        
-        // If no match found, fall back to basic string parsing
-        let components = deviceType.split(separator: " ")
-        if components.count == 1 {
-            return String(components[0])
-        }
-        
-        // Remove any serial numbers or identifiers (typically numeric)
-        let nonNumericComponents = components.filter { !$0.allSatisfy { $0.isNumber } }
-        if let modelName = nonNumericComponents.last {
-            return String(modelName)
-        }
-        return deviceType
+        return deviceType.lowercased().trimmingCharacters(in: .whitespaces)
     }
     
     /// Loads all stored device fingerprints from persistent storage

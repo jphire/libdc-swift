@@ -128,11 +128,33 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     // MARK: - Service Discovery
+    @objc(getPeripheralReadyState)
+    public func getPeripheralReadyState() -> Bool {
+        return self.isPeripheralReady
+    }
+    
     @objc(discoverServices)
     public func discoverServices() -> Bool {
-        guard let peripheral = self.peripheral else { return false }
+        guard let peripheral = self.peripheral else {
+            logError("No peripheral available for service discovery")
+            return false
+        }
+        
+        // Check if peripheral is actually connected
+        guard peripheral.state == .connected else {
+            logError("Peripheral not in connected state: \(peripheral.state.rawValue)")
+            return false
+        }
+        
         peripheral.discoverServices(nil)
+        
+        // Wait for characteristics with timeout
+        let timeout = Date(timeIntervalSinceNow: 5.0)
         while writeCharacteristic == nil || notifyCharacteristic == nil {
+            if Date() > timeout {
+                logError("Timeout waiting for service discovery")
+                return false
+            }
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         }
         
@@ -142,9 +164,26 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @objc(enableNotifications)
     public func enableNotifications() -> Bool {
         guard let notifyCharacteristic = self.notifyCharacteristic,
-              let peripheral = self.peripheral else { return false }
+              let peripheral = self.peripheral else {
+            logError("Missing characteristic or peripheral for notifications")
+            return false
+        }
+        
+        // Check if peripheral is actually connected
+        guard peripheral.state == .connected else {
+            logError("Peripheral not in connected state for notifications: \(peripheral.state.rawValue)")
+            return false
+        }
+        
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
+        
+        // Wait for notifications to be enabled with timeout
+        let timeout = Date(timeIntervalSinceNow: 5.0)
         while !notifyCharacteristic.isNotifying {
+            if Date() > timeout {
+                logError("Timeout waiting for notifications to enable")
+                return false
+            }
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         }
         
@@ -424,8 +463,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.isPeripheralReady = false
             self.connectedDevice = nil
             
-            // Don't attempt to reconnect if we initiated the disconnect
-            if !self.isDisconnecting {
+            // Don't attempt to reconnect if:
+            // 1. We initiated the disconnect
+            // 2. A download is currently in progress (will cause race conditions)
+            if !self.isDisconnecting && !self.isRetrievingLogs {
                 // Attempt to reconnect if this was a stored device
                 if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) {
                     logInfo("Attempting to reconnect to stored device")
@@ -434,6 +475,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                         deviceAddress: storedDevice.uuid
                     )
                 }
+            } else if self.isRetrievingLogs {
+                logWarning("⚠️ Disconnected during download - NOT auto-reconnecting to avoid race condition")
             }
         }
     }

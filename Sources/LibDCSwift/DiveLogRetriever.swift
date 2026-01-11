@@ -236,20 +236,57 @@ public class DiveLogRetriever {
 
                 let deviceName = device.name ?? "Unknown Device"
 
+                // Get device type from stored configuration (user-selected) for consistent fingerprint lookups
+                let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: device.identifier.uuidString)
+                let deviceTypeForFingerprint: String
+                if let stored = storedDevice,
+                   let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
+                    deviceTypeForFingerprint = modelInfo.name
+                    logInfo("📍 Using stored device config: \(modelInfo.name)")
+                } else {
+                    deviceTypeForFingerprint = DeviceConfiguration.getDeviceDisplayName(from: deviceName)
+                    logInfo("📍 Using device name: \(deviceTypeForFingerprint)")
+                }
+
+                // Always fetch device info first if not available
+                // This ensures we have the serial number for fingerprint lookup
+                if devicePtr.pointee.have_devinfo == 0 {
+                    logInfo("📍 Fetching device info before download...")
+                    let semaphore = DispatchSemaphore(value: 0)
+                    var fetchSuccess = false
+                    
+                    DeviceConfiguration.fetchDeviceInfo(deviceDataPtr: devicePtr) { success in
+                        fetchSuccess = success
+                        semaphore.signal()
+                    }
+                    
+                    semaphore.wait()
+                    
+                    if !fetchSuccess {
+                        logError("❌ Failed to fetch device info")
+                        DispatchQueue.main.async {
+                            viewModel.setDetailedError("Failed to fetch device info", status: DC_STATUS_IO)
+                            completion(false)
+                        }
+                        return
+                    }
+                }
+
                 var storedFingerprint: Data? = nil
                 if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
-                    storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceName, serial: serial)
-                    
+                    storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
+
                     if let fingerprint = storedFingerprint {
                         logInfo("📍 Found stored fingerprint for incremental download: \(fingerprint.hexString)")
-                        logInfo("   Device: \(deviceName), Serial: \(serial)")
+                        logInfo("   Device: \(deviceTypeForFingerprint), Serial: \(serial)")
                     } else {
                         logInfo("📍 No stored fingerprint - will download all dives")
-                        logInfo("   Device: \(deviceName), Serial: \(serial)")
+                        logInfo("   Device: \(deviceTypeForFingerprint), Serial: \(serial)")
                     }
                 } else {
-                    logInfo("📍 No device info available yet - will download all dives")
+                    logError("❌ Device info still not available after fetch attempt")
+                    logInfo("📍 Proceeding with full download")
                 }
 
                 let context = CallbackContext(
@@ -351,9 +388,15 @@ public class DiveLogRetriever {
                     } else {
                         // Download completed successfully
                         if shouldSaveFingerprint, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
-                            // Use the EXACT device type from libdivecomputer (e.g., "Shearwater Peregrine TX")
-                            // This ensures perfect match with the lookup callback
-                            let deviceType = context.deviceTypeFromLibDC ?? context.deviceName
+                            // Use stored device configuration (user-selected) for consistent fingerprint storage
+                            let deviceType: String
+                            if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID),
+                               let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
+                                deviceType = modelInfo.name
+                            } else {
+                                // Fall back to libdivecomputer name or device name
+                                deviceType = context.deviceTypeFromLibDC ?? context.deviceName
+                            }
                             logInfo("✅ Download completed - saving fingerprint of last dive for incremental downloads")
                             logInfo("   Device Type: \(deviceType)")
                             logInfo("   Serial: \(serial)")

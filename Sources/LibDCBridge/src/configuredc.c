@@ -162,7 +162,7 @@ static dc_status_t ble_stream_ioctl(dc_iostream_t *iostream, unsigned int reques
  *------------------------------------------------------------------*/
 static dc_status_t ble_stream_sleep(dc_iostream_t *iostream, unsigned int milliseconds)
 {
-    printf("DC_IO [SLEEP] %u ms\n", milliseconds);
+    // printf("DC_IO [SLEEP] %u ms\n", milliseconds);
     ble_stream_t *s = (ble_stream_t *) iostream;
     return ble_sleep(s->ble_object, milliseconds);
 }
@@ -446,7 +446,8 @@ static const struct name_pattern name_patterns[] = {
     { "Petrel", "Shearwater", "Petrel 2", MATCH_EXACT },  // Both Petrel and Petrel 2 identify as "Petrel"
     { "Perdix", "Shearwater", "Perdix", MATCH_EXACT },
     { "Teric", "Shearwater", "Teric", MATCH_EXACT },
-    { "Peregrine", "Shearwater", "Peregrine", MATCH_EXACT },
+    { "Peregrine TX", "Shearwater", "Peregrine TX", MATCH_EXACT },
+    { "Peregrine", "Shearwater", "Peregrine TX", MATCH_EXACT },  // BLE advertises as "Peregrine" but hardware is Peregrine TX
     { "NERD 2", "Shearwater", "NERD 2", MATCH_EXACT },
     { "NERD", "Shearwater", "NERD", MATCH_EXACT },
     { "Tern", "Shearwater", "Tern", MATCH_EXACT },

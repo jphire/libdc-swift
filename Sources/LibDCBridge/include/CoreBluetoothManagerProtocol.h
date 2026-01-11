@@ -7,6 +7,7 @@
 @protocol CoreBluetoothManagerProtocol <NSObject>
 + (id)shared;
 - (BOOL)connectToDevice:(NSString *)address;
+- (BOOL)getPeripheralReadyState;
 - (BOOL)discoverServices;
 - (BOOL)enableNotifications;
 - (BOOL)writeData:(NSData *)data;
