@@ -64,6 +64,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     @Published public var isDisconnecting = false // Indicates if currently disconnecting from device
     @Published public var isBluetoothReady = false // Indicates if Bluetooth is ready for use
+    @Published public var isConnecting = false // Indicates if a connection attempt is in progress (prevents auto-reconnect)
     @Published private var deviceDataPtrChanged = false
 
     // MARK: - Private Properties
@@ -72,6 +73,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     private var notifyCharacteristic: CBCharacteristic?
     private var receivedData: Data = Data()
     private let queue = DispatchQueue(label: "com.blemanager.queue")
+    private let dataAvailableSemaphore = DispatchSemaphore(value: 0) // Signals when new data arrives
     private let frameMarker: UInt8 = 0x7E
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
     private var connectionCompletion: ((Bool) -> Void)?
@@ -89,7 +91,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         set {
             objectWillChange.send()
             _deviceDataPtr = newValue
-            logDebug("Device data pointer \(newValue == nil ? "cleared" : "set")")
         }
     }
     
@@ -232,7 +233,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
             queue.sync {
                 if !receivedData.isEmpty {
-                    // IMPORTANT: We take EXACTLY what was requested, no more.
                     let amount = min(requestedInt, receivedData.count)
                     outData = receivedData.prefix(amount)
                     receivedData.removeSubrange(0..<amount)
@@ -243,9 +243,12 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 return data
             }
 
-            // High-precision sleep to avoid blocking the thread while
-            // waiting for the radio to deliver the next packet.
-            Thread.sleep(forTimeInterval: 0.002) // 2ms
+            // Wait for data - use semaphore with short timeout, fall back to brief sleep
+            let result = dataAvailableSemaphore.wait(timeout: .now() + .milliseconds(50))
+            if result == .timedOut {
+                // Brief sleep as fallback to avoid tight spin loop
+                Thread.sleep(forTimeInterval: 0.001)
+            }
         }
 
         return nil
@@ -260,26 +263,27 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         queue.sync {
             if !receivedData.isEmpty {
-                logInfo("Clearing \(receivedData.count) bytes from receive buffer")
                 receivedData.removeAll()
             }
         }
-        
+
+        // Drain and signal semaphore to unblock any waiting reads and clear stale signals
+        while dataAvailableSemaphore.wait(timeout: .now()) == .success {
+            // Drain any accumulated signals
+        }
+        dataAvailableSemaphore.signal() // Signal once to unblock any waiting read
+
         if clearDevicePtr {
             if let devicePtr = self.openedDeviceDataPtr {
-                logDebug("Closing device data pointer")
                 if devicePtr.pointee.device != nil {
-                    logDebug("Closing device")
                     dc_device_close(devicePtr.pointee.device)
                 }
-                logDebug("Deallocating device data pointer")
                 devicePtr.deallocate()
                 self.openedDeviceDataPtr = nil
             }
         }
         
         if let peripheral = self.peripheral {
-            logDebug("Disconnecting peripheral")
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
             self.peripheral = nil
@@ -328,7 +332,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     
     // MARK: - State Management
     public func clearRetrievalState() {
-        logDebug("🧹 Clearing retrieval state")
         DispatchQueue.main.async { [weak self] in
             self?.isRetrievingLogs = false
             self?.currentRetrievalDevice = nil
@@ -341,7 +344,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             if let peripheral = peripheral {
                 // For iOS/macOS, we can only ensure the connection stays alive
                 // by maintaining the peripheral reference and keeping the central manager active
-                logInfo("Setting up background mode for peripheral: \(peripheral.identifier)")
                 
                 #if os(iOS)
                 // On iOS, we can request background execution time
@@ -358,11 +360,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 #endif
             }
         } else {
-            logInfo("Disabling background mode")
             #if os(iOS)
             // Clean up any background tasks when disabling background mode
             if let peripheral = peripheral {
-                logInfo("Cleaning up background mode for peripheral: \(peripheral.identifier)")
                 if let task = currentBackgroundTask, task != .invalid {
                     UIApplication.shared.endBackgroundTask(task)
                     currentBackgroundTask = nil
@@ -466,7 +466,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             // Don't attempt to reconnect if:
             // 1. We initiated the disconnect
             // 2. A download is currently in progress (will cause race conditions)
-            if !self.isDisconnecting && !self.isRetrievingLogs {
+            // 3. A connection attempt is already in progress
+            if !self.isDisconnecting && !self.isRetrievingLogs && !self.isConnecting {
                 // Attempt to reconnect if this was a stored device
                 if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) {
                     logInfo("Attempting to reconnect to stored device")
@@ -477,14 +478,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 }
             } else if self.isRetrievingLogs {
                 logWarning("⚠️ Disconnected during download - NOT auto-reconnecting to avoid race condition")
+            } else if self.isConnecting {
+                logWarning("⚠️ Disconnected during connection attempt - NOT auto-reconnecting")
             }
         }
     }
     
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         if peripheral.name != nil {
-            logDebug("Discovered \(peripheral.name ?? "unnamed device")")
-            
             // Add the peripheral if:
             // 1. It's a stored device
             // 2. It's a supported device
@@ -510,17 +511,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         for service in services {
             if isExcludedService(service.uuid) {
-                logInfo("Ignoring known firmware service: \(service.uuid)")
                 continue
             }
             
             if let knownService = isKnownSerialService(service.uuid) {
-                logInfo("Found known service: \(knownService.vendor) \(knownService.product)")
                 preferredService = service
                 writeCharacteristic = nil
                 notifyCharacteristic = nil
-            } else if !service.uuid.isStandardBluetooth {
-                logInfo("Discovering characteristics for unknown service: \(service.uuid)")
             }
             peripheral.discoverCharacteristics(nil, for: service)
         }
@@ -539,12 +536,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         for characteristic in characteristics {
             if isWriteCharacteristic(characteristic) {
-                logInfo("Found write characteristic: \(characteristic.uuid)")
                 writeCharacteristic = characteristic
             }
             
             if isReadCharacteristic(characteristic) {
-                logInfo("Found notify characteristic: \(characteristic.uuid)")
                 notifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
             }
@@ -558,40 +553,29 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         
         guard let data = characteristic.value else {
-            logWarning("No data received from characteristic")
             return
-        }
-        
-        // Log just the data size and first few bytes as a preview
-        let preview = data.prefix(4).map { String(format: "%02x", $0) }.joined()
-        if Logger.shared.shouldShowRawData {
-            logDebug("Received data: \(preview)... (\(data.count) bytes)")
         }
         
         queue.sync {
             // Append new data to our buffer immediately
             receivedData.append(data)
-            if Logger.shared.shouldShowRawData {
-                logDebug("Buffer: \(receivedData.hexEncodedString())")
-            }
         }
-        
+
+        // Signal that data is available - wake up any waiting read
+        dataAvailableSemaphore.signal()
+
         updateTransferStats(data.count)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             logError("Error writing to characteristic: \(error.localizedDescription)")
-        } else {
-            logDebug("Successfully wrote to characteristic")
         }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             logError("Error changing notification state: \(error.localizedDescription)")
-        } else {
-            logInfo("Notification state updated: \(characteristic.isNotifying ? "enabled" : "disabled")")
         }
     }
 
@@ -604,10 +588,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             if interval > 0 {
                 let currentRate = Double(newBytes) / interval
                 averageTransferRate = (averageTransferRate * 0.7) + (currentRate * 0.3)
-                
-                if totalBytesReceived % 1000 == 0 {  // Log every KB
-                    logInfo("Transfer rate: \(Int(averageTransferRate)) bytes/sec")
-                }
             }
         }
         

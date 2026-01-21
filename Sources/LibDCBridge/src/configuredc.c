@@ -241,9 +241,20 @@ static void ble_device_event_cb(dc_device_t *device, dc_event_type_t event, cons
                 );
                 
                 if (fingerprint && fsize > 0) {
-                    dc_device_set_fingerprint(device, fingerprint, fsize);
+                    printf("[C] Setting fingerprint on device: ");
+                    for (size_t i = 0; i < fsize; i++) {
+                        printf("0x%02x ", fingerprint[i]);
+                    }
+                    printf("(size=%zu)\n", fsize);
+
+                    dc_status_t fp_status = dc_device_set_fingerprint(device, fingerprint, fsize);
+                    printf("[C] dc_device_set_fingerprint returned: %d\n", fp_status);
+
                     devdata->fingerprint = fingerprint;
                     devdata->fsize = fsize;
+                } else {
+                    printf("[C] No fingerprint returned from callback (fingerprint=%p, fsize=%zu)\n",
+                           (void*)fingerprint, fsize);
                 }
             }
         }

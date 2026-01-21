@@ -244,7 +244,9 @@ public class DiveDataViewModel: ObservableObject {
     
     public func updateProgress(count: Int) {
         DispatchQueue.main.async {
-            self.status = "Downloading Dive #\(count)"
+            // Don't show dive number during download since dives arrive newest-first
+            // and we renumber them after download (oldest = #1)
+            self.status = "Downloading dive \(count)..."
             self.progress = .inProgress(count)
         }
     }
@@ -319,6 +321,25 @@ public class DiveDataViewModel: ObservableObject {
             if case .inProgress = self.progress {
                 self.updateProgress(count: self.dives.count)
             }
+        }
+    }
+
+    /// Finalizes dive numbering after download completes.
+    /// Sorts dives by date (oldest first) and assigns sequential numbers starting from 1.
+    /// Call this after all dives have been downloaded.
+    public func finalizeDiveNumbering() {
+        DispatchQueue.main.async {
+            guard !self.dives.isEmpty else { return }
+
+            // Sort by datetime (oldest first)
+            self.dives.sort { $0.datetime < $1.datetime }
+
+            // Renumber starting from 1
+            for i in 0..<self.dives.count {
+                self.dives[i].number = i + 1
+            }
+
+            logInfo("📋 Finalized dive numbering: \(self.dives.count) dives (oldest=#1, newest=#\(self.dives.count))")
         }
     }
     

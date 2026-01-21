@@ -107,14 +107,27 @@ public class DeviceFingerprintStorage {
     public func clearFingerprint(forDeviceType deviceType: String, serial: String) {
         var fingerprints = loadFingerprints()
         let normalizedType = normalizeDeviceType(deviceType)
-        fingerprints.removeAll { 
-            normalizeDeviceType($0.deviceType) == normalizedType && 
-            $0.serial == serial 
+        fingerprints.removeAll {
+            normalizeDeviceType($0.deviceType) == normalizedType &&
+            $0.serial == serial
         }
         saveFingerprints(fingerprints)
         logInfo("🗑️ Cleared fingerprint for \(normalizedType) (\(serial))")
     }
-    
+
+    /// Clears all fingerprints for a specific device type (any serial)
+    public func clearFingerprintsForDeviceType(_ deviceType: String) {
+        var fingerprints = loadFingerprints()
+        let normalizedType = normalizeDeviceType(deviceType)
+        let countBefore = fingerprints.count
+        fingerprints.removeAll {
+            normalizeDeviceType($0.deviceType) == normalizedType
+        }
+        let removed = countBefore - fingerprints.count
+        saveFingerprints(fingerprints)
+        logInfo("🗑️ Cleared \(removed) fingerprint(s) for device type: \(normalizedType)")
+    }
+
     /// Clears all stored fingerprints
     public func clearAllFingerprints() {
         UserDefaults.standard.removeObject(forKey: fingerprintKey)

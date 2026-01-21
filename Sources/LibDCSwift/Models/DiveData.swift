@@ -217,7 +217,7 @@ public struct Location {
 
 public struct DiveData: Identifiable {
     public let id = UUID()
-    public let number: Int
+    public var number: Int  // Mutable to allow renumbering after download (oldest = 1)
     public let datetime: Date
     
     // Basic dive data

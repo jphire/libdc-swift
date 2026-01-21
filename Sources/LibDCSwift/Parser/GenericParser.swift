@@ -358,7 +358,6 @@ public class GenericParser {
         
         // Get gas mix information
         if let gasmixCount: UInt32 = getField(parser, type: DC_FIELD_GASMIX_COUNT) {
-            logInfo("📊 Found \(gasmixCount) gas mixes")
             for i in 0..<gasmixCount {
                 if let gasmix: dc_gasmix_t = getField(parser, type: DC_FIELD_GASMIX, flags: UInt32(i)) {
                     let mix = GasMix(
@@ -368,7 +367,6 @@ public class GenericParser {
                         usage: gasmix.usage
                     )
                     wrapper.data.gasMixes.append(mix)
-                    logInfo("  Gas Mix \(i): O2=\(gasmix.oxygen * 100)%, He=\(gasmix.helium * 100)%, N2=\(gasmix.nitrogen * 100)%")
                 }
             }
         }
@@ -387,8 +385,6 @@ public class GenericParser {
         _ = dc_parser_get_field(parser, DC_FIELD_DECOMODEL, 0, &decoValue)
         if let decoModel: dc_decomodel_t = getField(parser, type: DC_FIELD_DECOMODEL) {
             wrapper.setDecoModel(decoModel)
-        } else {
-            logInfo("Failed to get decompression model field")
         }
         
         // Get dive mode

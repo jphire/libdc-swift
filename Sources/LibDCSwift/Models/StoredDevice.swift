@@ -11,13 +11,15 @@ public class StoredDevice: Codable {
    public let family: DeviceConfiguration.DeviceFamily
    public let model: UInt32
    public let lastConnected: Date
-   
-   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32) {
+   public var serial: String?  // Hardware serial number for fingerprint tracking
+
+   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil) {
        self.uuid = uuid
        self.name = name
        self.family = family
        self.model = model
        self.lastConnected = Date()
+       self.serial = serial
    }
    
    private enum CodingKeys: String, CodingKey {
@@ -26,8 +28,9 @@ public class StoredDevice: Codable {
        case family
        case model
        case lastConnected
+       case serial
    }
-   
+
    public required init(from decoder: Decoder) throws {
        let container = try decoder.container(keyedBy: CodingKeys.self)
        uuid = try container.decode(String.self, forKey: .uuid)
@@ -35,8 +38,9 @@ public class StoredDevice: Codable {
        family = try container.decode(DeviceConfiguration.DeviceFamily.self, forKey: .family)
        model = try container.decode(UInt32.self, forKey: .model)
        lastConnected = try container.decode(Date.self, forKey: .lastConnected)
+       serial = try container.decodeIfPresent(String.self, forKey: .serial)  // Optional for backward compatibility
    }
-   
+
    public func encode(to encoder: Encoder) throws {
        var container = encoder.container(keyedBy: CodingKeys.self)
        try container.encode(uuid, forKey: .uuid)
@@ -44,6 +48,7 @@ public class StoredDevice: Codable {
        try container.encode(family, forKey: .family)
        try container.encode(model, forKey: .model)
        try container.encode(lastConnected, forKey: .lastConnected)
+       try container.encodeIfPresent(serial, forKey: .serial)
    }
 }
 
@@ -85,22 +90,34 @@ public class StoredDevice: Codable {
        }
    }
    
-   public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32) {
-       let device = StoredDevice(uuid: uuid, name: name, family: family, model: model)
+   public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil) {
+       let device = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial)
        if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
-           storedDevices[index] = device
+           // Preserve existing serial if new one not provided
+           let existingSerial = storedDevices[index].serial
+           let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existingSerial)
+           storedDevices[index] = deviceWithSerial
            logDebug("Updated stored device: \(name)")
        } else {
            storedDevices.append(device)
            logDebug("Added new stored device: \(name)")
        }
        saveDevices()
-       
+
        // Verify storage
        if let stored = getStoredDevice(uuid: uuid) {
            logDebug("Successfully stored device: \(stored.name)")
        } else {
            logError("Failed to store device: \(name)")
+       }
+   }
+
+   /// Updates the serial number for an existing stored device
+   public func updateDeviceSerial(uuid: String, serial: String) {
+       if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
+           storedDevices[index].serial = serial
+           saveDevices()
+           logDebug("Updated serial for device \(storedDevices[index].name): \(serial)")
        }
    }
    
@@ -109,6 +126,25 @@ public class StoredDevice: Codable {
    }
    
    public func removeDevice(uuid: String) {
+       // Get device info before removing for fingerprint cleanup
+       if let device = storedDevices.first(where: { $0.uuid == uuid }) {
+           // Get the device type name for fingerprint lookup
+           if let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == device.model && $0.family == device.family }),
+              let serial = device.serial {
+               // Clear the fingerprint for this device
+               DeviceFingerprintStorage.shared.clearFingerprint(forDeviceType: modelInfo.name, serial: serial)
+               logInfo("🗑️ Cleared fingerprint for \(modelInfo.name) (serial: \(serial))")
+           } else if device.serial == nil {
+               // No serial stored - try to clear fingerprints matching the device type for any serial
+               if let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == device.model && $0.family == device.family }) {
+                   logWarning("⚠️ Device has no serial stored - clearing all fingerprints for \(modelInfo.name)")
+                   DeviceFingerprintStorage.shared.clearFingerprintsForDeviceType(modelInfo.name)
+               } else {
+                   logWarning("⚠️ Device has no serial stored and unknown model - fingerprint may not be cleared")
+               }
+           }
+       }
+
        storedDevices.removeAll { $0.uuid == uuid }
        saveDevices()
        NotificationCenter.default.post(

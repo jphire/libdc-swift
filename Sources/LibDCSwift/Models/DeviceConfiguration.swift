@@ -126,6 +126,13 @@ import LibDCBridge
     ) -> Bool {
         logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
+        // Set connecting flag to prevent auto-reconnect during connection attempt
+        DispatchQueue.main.async {
+            if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
+                manager.isConnecting = true
+            }
+        }
+
         var deviceData: UnsafeMutablePointer<device_data_t>?
         let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceAddress)
 
@@ -187,12 +194,19 @@ import LibDCBridge
             DispatchQueue.main.async {
                 if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
                     manager.openedDeviceDataPtr = data
+                    manager.isConnecting = false // Clear connecting flag on success
                 }
             }
             return true
         }
 
         logError("Failed to open device (status: \(status))")
+        // Clear connecting flag on failure
+        DispatchQueue.main.async {
+            if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
+                manager.isConnecting = false
+            }
+        }
         if let data = deviceData {
             data.deallocate()
         }

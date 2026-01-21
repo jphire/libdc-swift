@@ -65,25 +65,24 @@ public class DiveLogRetriever {
             // Capture the exact device type string from libdivecomputer
             if let modelCStr = devicePtr.pointee.model {
                 context.deviceTypeFromLibDC = String(cString: modelCStr)
-                logInfo("📱 Device Type from libdivecomputer: \(context.deviceTypeFromLibDC!)")
             }
             
             if let desc = devicePtr.pointee.descriptor {
                 context.detectedFamily = dc_descriptor_get_type(desc)
             }
-            
-            logInfo("📱 Detected Device Hardware - Family: \(context.detectedFamily), Model: \(context.detectedModel)")
-            
+
+            // Update stored device with serial for fingerprint cleanup when forgetting
+            if let serial = context.deviceSerial {
+                DeviceStorage.shared.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
+            }
+
             // Now that we have device info, load the stored fingerprint if we don't have it yet
             if context.storedFingerprint == nil,
                let deviceType = context.deviceTypeFromLibDC,
                let serial = context.deviceSerial {
                 context.storedFingerprint = context.viewModel.getFingerprint(forDeviceType: deviceType, serial: serial)
-                if let fp = context.storedFingerprint {
-                    logInfo("📍 Loaded stored fingerprint after device info: \(fp.hexString)")
-                }
             }
-            
+
             // Update storage if hardware tells us something different (e.g. 13 vs 9)
             DeviceConfiguration.updateDeviceConfigurationFromHardware(
                 deviceAddress: context.deviceUUID,
@@ -95,7 +94,7 @@ public class DiveLogRetriever {
         }
         
         let fingerprintData = Data(bytes: fingerprint, count: Int(fsize))
-        
+
         // Capture the FIRST dive's fingerprint (most recent dive on the device)
         // This is what we'll compare against on the next download
         if context.logCount == 1 {
@@ -106,19 +105,9 @@ public class DiveLogRetriever {
         if let storedFingerprint = context.storedFingerprint {
             if storedFingerprint == fingerprintData {
                 logInfo("✨ Found matching fingerprint - all new dives downloaded")
-                logInfo("   Stored: \(storedFingerprint.hexString)")
-                logInfo("   Current: \(fingerprintData.hexString)")
                 context.fingerprintMatched = true
                 return 0  // Stop enumeration - we've reached already-downloaded dives
-            } else {
-                logInfo("📥 Dive #\(context.logCount) - New dive found")
-                if context.logCount == 1 {
-                    logInfo("   Stored fingerprint: \(storedFingerprint.hexString)")
-                    logInfo("   Current fingerprint: \(fingerprintData.hexString)")
-                }
             }
-        } else {
-            logInfo("📥 Dive #\(context.logCount) - Downloading (no stored fingerprint)")
         }
         
         // 4. Parse & Store Dive
@@ -136,7 +125,6 @@ public class DiveLogRetriever {
         } else if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID) {
             familyToUse = stored.family.asDCFamily
             modelToUse = stored.model
-            logInfo("ℹ️ Using Stored Configuration - Model: \(modelToUse)")
         } else if let deviceInfo = DeviceConfiguration.fromName(context.deviceName) {
             familyToUse = deviceInfo.family.asDCFamily
             modelToUse = deviceInfo.model
@@ -192,18 +180,26 @@ public class DiveLogRetriever {
         
         if let serialStr = serial.map({ String(cString: $0) }),
            let typeStr = deviceType.map({ String(cString: $0) }) {
-             logInfo("🔍 Fingerprint lookup called:")
-             logInfo("   Device Type: \(typeStr)")
-             logInfo("   Serial: \(serialStr)")
              
              if let fingerprint = viewModel.getFingerprint(forDeviceType: typeStr, serial: serialStr) {
-                logInfo("✅ Returning stored fingerprint to libdivecomputer: \(fingerprint.hexString)")
+                // Sanity check: Shearwater fingerprints should be exactly 4 bytes
+                if fingerprint.count != 4 {
+                    logWarning("⚠️ Fingerprint size mismatch! Expected 4 bytes, got \(fingerprint.count)")
+                }
+
                 size.pointee = fingerprint.count
                 let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: fingerprint.count)
                 fingerprint.copyBytes(to: buffer, count: fingerprint.count)
                 return buffer
             } else {
-                logInfo("❌ No fingerprint found for device: \(typeStr), serial: \(serialStr)")
+                // No stored fingerprint - return a sentinel value (0xFFFFFFFF) that won't match any real dive
+                // This is necessary because libdivecomputer defaults to 0x00000000 if no fingerprint is set,
+                // which could accidentally match a dive with fingerprint 0x00000000 and stop enumeration
+                let sentinelFingerprint: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF]
+                size.pointee = sentinelFingerprint.count
+                let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: sentinelFingerprint.count)
+                buffer.initialize(from: sentinelFingerprint, count: sentinelFingerprint.count)
+                return buffer
             }
         } else {
             logWarning("⚠️ Fingerprint lookup called with nil device type or serial")
@@ -242,51 +238,16 @@ public class DiveLogRetriever {
                 if let stored = storedDevice,
                    let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
                     deviceTypeForFingerprint = modelInfo.name
-                    logInfo("📍 Using stored device config: \(modelInfo.name)")
                 } else {
                     deviceTypeForFingerprint = DeviceConfiguration.getDeviceDisplayName(from: deviceName)
-                    logInfo("📍 Using device name: \(deviceTypeForFingerprint)")
-                }
-
-                // Always fetch device info first if not available
-                // This ensures we have the serial number for fingerprint lookup
-                if devicePtr.pointee.have_devinfo == 0 {
-                    logInfo("📍 Fetching device info before download...")
-                    let semaphore = DispatchSemaphore(value: 0)
-                    var fetchSuccess = false
-                    
-                    DeviceConfiguration.fetchDeviceInfo(deviceDataPtr: devicePtr) { success in
-                        fetchSuccess = success
-                        semaphore.signal()
-                    }
-                    
-                    semaphore.wait()
-                    
-                    if !fetchSuccess {
-                        logError("❌ Failed to fetch device info")
-                        DispatchQueue.main.async {
-                            viewModel.setDetailedError("Failed to fetch device info", status: DC_STATUS_IO)
-                            completion(false)
-                        }
-                        return
-                    }
                 }
 
                 var storedFingerprint: Data? = nil
+                // Try to get fingerprint if we already have device info (from a previous connection)
                 if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
+                    DeviceStorage.shared.updateDeviceSerial(uuid: device.identifier.uuidString, serial: serial)
                     storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
-
-                    if let fingerprint = storedFingerprint {
-                        logInfo("📍 Found stored fingerprint for incremental download: \(fingerprint.hexString)")
-                        logInfo("   Device: \(deviceTypeForFingerprint), Serial: \(serial)")
-                    } else {
-                        logInfo("📍 No stored fingerprint - will download all dives")
-                        logInfo("   Device: \(deviceTypeForFingerprint), Serial: \(serial)")
-                    }
-                } else {
-                    logError("❌ Device info still not available after fetch attempt")
-                    logInfo("📍 Proceeding with full download")
                 }
 
                 let context = CallbackContext(
@@ -309,16 +270,10 @@ public class DiveLogRetriever {
                 devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
                 devicePtr.pointee.lookup_fingerprint = fingerprintLookup
                 
-                if storedFingerprint != nil {
-                    logInfo("🔄 Starting dive enumeration (Incremental Download - only new dives)...")
-                } else {
-                    logInfo("🔄 Starting dive enumeration (Full Download - all dives)...")
-                }
-                
                 let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
 
-                // Log the exact error code for debugging
-                if enumStatus != DC_STATUS_SUCCESS {
+                // Log errors for debugging
+                if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
                     let errorName: String
                     switch enumStatus {
                     case DC_STATUS_UNSUPPORTED: errorName = "UNSUPPORTED"
@@ -328,13 +283,11 @@ public class DiveLogRetriever {
                     case DC_STATUS_NOACCESS: errorName = "NOACCESS"
                     case DC_STATUS_IO: errorName = "IO"
                     case DC_STATUS_TIMEOUT: errorName = "TIMEOUT"
-                    case DC_STATUS_PROTOCOL: errorName = "PROTOCOL"
                     case DC_STATUS_DATAFORMAT: errorName = "DATAFORMAT"
                     case DC_STATUS_CANCELLED: errorName = "CANCELLED"
                     default: errorName = "UNKNOWN(\(enumStatus))"
                     }
-                    logError("❌ dc_device_foreach returned DC_STATUS_\(errorName) (code: \(enumStatus))")
-                    logError("   Context: hasNewDives=\(context.hasNewDives), logCount=\(context.logCount)")
+                    logError("❌ Download failed: DC_STATUS_\(errorName)")
                 }
 
                 progressTimer.invalidate()
@@ -354,7 +307,6 @@ public class DiveLogRetriever {
                         // Protocol error - could be genuine error OR early termination from callback
                         if context.fingerprintMatched {
                             // We stopped because we found matching fingerprint (no new dives)
-                            logInfo("ℹ️ Download stopped at stored fingerprint - no new dives")
                             downloadSucceeded = true
                             shouldSaveFingerprint = false  // Don't update fingerprint if no new dives
                         } else if context.hasNewDives {
@@ -364,7 +316,6 @@ public class DiveLogRetriever {
                             shouldSaveFingerprint = false  // Don't save partial download fingerprint
                         } else if context.storedFingerprint != nil {
                             // Protocol error with fingerprint but no dives downloaded
-                            logInfo("ℹ️ Protocol error with stored fingerprint - likely no new dives")
                             downloadSucceeded = true
                             shouldSaveFingerprint = false
                         } else {
@@ -382,7 +333,6 @@ public class DiveLogRetriever {
                     
                     // Handle the outcome
                     if !downloadSucceeded {
-                        logWarning("⚠️ Download incomplete - fingerprint NOT saved to allow full retry")
                         viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
                         completion(false)
                     } else {
@@ -397,16 +347,15 @@ public class DiveLogRetriever {
                                 // Fall back to libdivecomputer name or device name
                                 deviceType = context.deviceTypeFromLibDC ?? context.deviceName
                             }
-                            logInfo("✅ Download completed - saving fingerprint of last dive for incremental downloads")
-                            logInfo("   Device Type: \(deviceType)")
-                            logInfo("   Serial: \(serial)")
-                            logInfo("   Fingerprint: \(lastFP.hexString)")
+                            logInfo("✅ Download completed - \(context.logCount - 1) dive(s) downloaded")
                             viewModel.saveFingerprint(lastFP, deviceType: deviceType, serial: serial)
+                            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
                             viewModel.updateProgress(.completed)
                         } else if context.fingerprintMatched || (context.storedFingerprint != nil && !context.hasNewDives) {
                             logInfo("ℹ️ No new dives found")
                             viewModel.updateProgress(.noNewDives)
                         } else {
+                            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
                             viewModel.updateProgress(.completed)
                         }
                         completion(true)
