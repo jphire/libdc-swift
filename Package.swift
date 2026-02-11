@@ -33,6 +33,10 @@ let package = Package(
                 .headerSearchPath("src"),
                 .define("HAVE_PTHREAD_H")
             ]
+ .library(
+ name: "Clibdivecomputer",
+ targets: ["Clibdivecomputer"]
+ ),
         ),
         .target(
             name: "LibDCBridge",
