@@ -59,6 +59,9 @@ dc_status_t ble_close(ble_object_t *io);
 // BLE setup functions
 void initializeBLEManager(void);
 bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress);
+// Scan so that retrievePeripherals(withIdentifiers:) can find the device in this process.
+void ble_start_scan(void);
+void ble_stop_scan(void);
 bool discoverServices(ble_object_t *io);
 bool enableNotifications(ble_object_t *io);
 
