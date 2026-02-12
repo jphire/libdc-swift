@@ -16,6 +16,10 @@ let package = Package(
             name: "LibDCBridge",
             type: .dynamic,
             targets: ["LibDCBridge"]
+        ),
+        .library(
+            name: "Clibdivecomputer",
+            targets: ["Clibdivecomputer"]
         )
     ],
     targets: [
@@ -33,10 +37,6 @@ let package = Package(
                 .headerSearchPath("src"),
                 .define("HAVE_PTHREAD_H")
             ]
- .library(
- name: "Clibdivecomputer",
- targets: ["Clibdivecomputer"]
- ),
         ),
         .target(
             name: "LibDCBridge",

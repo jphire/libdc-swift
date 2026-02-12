@@ -1,5 +1,6 @@
 #import "BLEBridge.h"
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 
 static id<CoreBluetoothManagerProtocol> bleManager = nil;
 
@@ -45,7 +46,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
             break;
         }
         // Small sleep to avoid busy-waiting
-        [NSThread sleepForTimeInterval:0.1];
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
     }
     
     // Final check if we're actually ready
@@ -70,6 +71,23 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     }
     
     return true;
+}
+
+void ble_start_scan(void) {
+    Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
+    id manager = [CoreBluetoothManagerClass shared];
+    SEL sel = NSSelectorFromString(@"startScanningWithOmitUnsupportedPeripherals:");
+    if ([manager respondsToSelector:sel]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, sel, NO);
+    }
+}
+
+void ble_stop_scan(void) {
+    Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
+    id manager = [CoreBluetoothManagerClass shared];
+    if ([manager respondsToSelector:@selector(stopScanning)]) {
+        [manager performSelector:@selector(stopScanning)];
+    }
 }
 
 bool discoverServices(ble_object_t *io) {
