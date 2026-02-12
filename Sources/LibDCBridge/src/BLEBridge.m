@@ -46,7 +46,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
             break;
         }
         // Small sleep to avoid busy-waiting
-        [NSThread sleepForTimeInterval:0.1];
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
     }
     
     // Final check if we're actually ready
@@ -78,7 +78,7 @@ void ble_start_scan(void) {
     id manager = [CoreBluetoothManagerClass shared];
     SEL sel = NSSelectorFromString(@"startScanningWithOmitUnsupportedPeripherals:");
     if ([manager respondsToSelector:sel]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, sel, YES);
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, sel, NO);
     }
 }
 

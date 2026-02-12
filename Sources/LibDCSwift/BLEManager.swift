@@ -243,12 +243,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 return data
             }
 
-            // Wait for data - use semaphore with short timeout, fall back to brief sleep
-            let result = dataAvailableSemaphore.wait(timeout: .now() + .milliseconds(50))
-            if result == .timedOut {
-                // Brief sleep as fallback to avoid tight spin loop
-                Thread.sleep(forTimeInterval: 0.001)
-            }
+            // Must run the run loop so CoreBluetooth delegate (didUpdateValueFor) runs and
+            // appends to receivedData. Blocking on semaphore/sleep on main thread would
+            // prevent the delegate from ever running and we'd never get BLE notifications.
+            let runLoop = Thread.isMainThread ? RunLoop.main : RunLoop.current
+            runLoop.run(until: Date(timeIntervalSinceNow: 0.05))
         }
 
         return nil
