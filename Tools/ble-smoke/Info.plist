@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>fi.pelastus20.ble-smoke</string>
+	<key>CFBundleName</key>
+	<string>ble-smoke</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Connect to BLE dive computers to test protocol open and dive download.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Connect to BLE dive computers to test protocol open and dive download.</string>
+</dict>
+</plist>

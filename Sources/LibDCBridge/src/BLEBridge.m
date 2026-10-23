@@ -1,5 +1,7 @@
 #import "BLEBridge.h"
+#import "configuredc.h"
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 
 static id<CoreBluetoothManagerProtocol> bleManager = nil;
 
@@ -20,9 +22,15 @@ void freeBLEObject(ble_object_t* obj) {
     }
 }
 
+static void ble_fail_stage(const char *stage) {
+    NSLog(@"%s", stage);
+    set_last_ble_open_stage(stage);
+}
+
 bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     if (!io || !deviceAddress) {
         NSLog(@"Invalid parameters passed to connectToBLEDevice");
+        ble_fail_stage("ble_packet_open: invalid args");
         return false;
     }
     
@@ -33,24 +41,26 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     bool success = [manager connectToDevice:address];
     if (!success) {
         NSLog(@"Failed to connect to device");
+        ble_fail_stage("ble_packet_open: connectToDevice failed");
         return false;
     }
     
-    // Wait for connection to complete by checking peripheral ready state
-    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0]; // 10 second timeout
+    // Wait for connection. CB callbacks use a dedicated queue — sleep, don't pump
+    // the main run loop (deadlocks when already on DispatchQueue.main).
+    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
     while ([[NSDate date] compare:timeout] == NSOrderedAscending) {
-        // Check if peripheral is ready using protocol method
         if ([manager getPeripheralReadyState]) {
             NSLog(@"Peripheral is ready for communication");
             break;
         }
-        // Small sleep to avoid busy-waiting
-        [NSThread sleepForTimeInterval:0.1];
+        usleep(50000); /* 50ms */
     }
     
     // Final check if we're actually ready
     if (![manager getPeripheralReadyState]) {
         NSLog(@"Timeout waiting for peripheral to be ready");
+        ble_fail_stage("ble_packet_open: peripheral ready timeout");
+        // Soft close — keep GATT so the host app can retry open without re-pairing.
         [manager close];
         return false;
     }
@@ -58,6 +68,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     success = [manager discoverServices];
     if (!success) {
         NSLog(@"Service discovery failed");
+        ble_fail_stage("ble_packet_open: discoverServices failed");
         [manager close];
         return false;
     }
@@ -65,11 +76,30 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     success = [manager enableNotifications];
     if (!success) {
         NSLog(@"Failed to enable notifications");
+        ble_fail_stage("ble_packet_open: enableNotifications failed");
         [manager close];
         return false;
     }
-    
+
+    NSLog(@"connectToBLEDevice: GATT ready, services + notifications OK");
     return true;
+}
+
+void ble_start_scan(void) {
+    Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
+    id manager = [CoreBluetoothManagerClass shared];
+    SEL sel = NSSelectorFromString(@"startScanningWithOmitUnsupportedPeripherals:");
+    if ([manager respondsToSelector:sel]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, sel, NO);
+    }
+}
+
+void ble_stop_scan(void) {
+    Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
+    id manager = [CoreBluetoothManagerClass shared];
+    if ([manager respondsToSelector:@selector(stopScanning)]) {
+        [manager performSelector:@selector(stopScanning)];
+    }
 }
 
 bool discoverServices(ble_object_t *io) {
@@ -93,7 +123,11 @@ dc_status_t ble_ioctl(ble_object_t *io, unsigned int request, void *data, size_t
 }
 
 dc_status_t ble_sleep(ble_object_t *io, unsigned int milliseconds) {
-    [NSThread sleepForTimeInterval:milliseconds / 1000.0];
+    // Pump main run loop so CoreBluetooth (main-queue) callbacks still run.
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:milliseconds / 1000.0];
+    while ([[NSDate date] compare:end] == NSOrderedAscending) {
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
     return DC_STATUS_SUCCESS;
 }
 

@@ -12,11 +12,21 @@ let package = Package(
             name: "LibDCSwift",
             targets: ["LibDCSwift"]
         ),
+        // Static (default) — required for Expo/RN apps that cannot use use_frameworks! :dynamic
+        // (Mapbox + Expo precompiled pods are static; dynamic LibDCBridge breaks EAS pod install).
         .library(
             name: "LibDCBridge",
-            type: .dynamic,
             targets: ["LibDCBridge"]
-        )
+        ),
+        .library(
+            name: "Clibdivecomputer",
+            targets: ["Clibdivecomputer"]
+        ),
+        /// Local macOS CLI: scan / open protocol / download without EAS or RescuePro.
+        .executable(
+            name: "ble-smoke",
+            targets: ["ble-smoke"]
+        ),
     ],
     targets: [
         .target(
@@ -33,10 +43,6 @@ let package = Package(
                 .headerSearchPath("src"),
                 .define("HAVE_PTHREAD_H")
             ]
- .library(
- name: "Clibdivecomputer",
- targets: ["Clibdivecomputer"]
- ),
         ),
         .target(
             name: "LibDCBridge",
@@ -83,6 +89,27 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
-        )
+        ),
+        .executableTarget(
+            name: "ble-smoke",
+            dependencies: [
+                "LibDCSwift",
+                "LibDCBridge",
+                "Clibdivecomputer",
+            ],
+            path: "Tools/ble-smoke",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .linkedFramework("CoreBluetooth"),
+                .linkedFramework("Foundation"),
+                // Embed Bluetooth usage description for macOS TCC.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Tools/ble-smoke/Info.plist",
+                ], .when(platforms: [.macOS])),
+            ]
+        ),
     ]
 ) 
