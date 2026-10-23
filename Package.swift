@@ -21,7 +21,12 @@ let package = Package(
         .library(
             name: "Clibdivecomputer",
             targets: ["Clibdivecomputer"]
-        )
+        ),
+        /// Local macOS CLI: scan / open protocol / download without EAS or RescuePro.
+        .executable(
+            name: "ble-smoke",
+            targets: ["ble-smoke"]
+        ),
     ],
     targets: [
         .target(
@@ -84,6 +89,27 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
-        )
+        ),
+        .executableTarget(
+            name: "ble-smoke",
+            dependencies: [
+                "LibDCSwift",
+                "LibDCBridge",
+                "Clibdivecomputer",
+            ],
+            path: "Tools/ble-smoke",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .linkedFramework("CoreBluetooth"),
+                .linkedFramework("Foundation"),
+                // Embed Bluetooth usage description for macOS TCC.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Tools/ble-smoke/Info.plist",
+                ], .when(platforms: [.macOS])),
+            ]
+        ),
     ]
 ) 

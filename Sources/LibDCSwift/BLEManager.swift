@@ -114,6 +114,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         SerialService(uuid: "fe25c237-0ece-443c-b0aa-e02033e7029d", vendor: "Shearwater", product: "Perdix/Teric"),
         SerialService(uuid: "0000fcef-0000-1000-8000-00805f9b34fb", vendor: "Divesoft", product: "Freedom")
     ]
+
+    /// Preferred TX/RX characteristic UUIDs (libdivecomputer wiki / Subsurface).
+    /// Property-only matching can pick the wrong char when a service exposes several.
+    private struct KnownSerialCharacteristics {
+        let service: String
+        let write: String
+        let notify: String
+    }
+    private let knownSerialCharacteristics: [KnownSerialCharacteristics] = [
+        // Suunto EON Steel / Core / D5 — Rx write-without-response, Tx notify
+        KnownSerialCharacteristics(
+            service: "98ae7120-e62e-11e3-badd-0002a5d5c51b",
+            write: "c6339440-e62e-11e3-a5b3-0002a5d5c51b",
+            notify: "d0fd6b80-e62e-11e3-a2e9-0002a5d5c51b"
+        ),
+    ]
     
     /// Service UUIDs to exclude from discovery
     private let excludedServices: Set<String> = [
@@ -258,10 +274,29 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return frameToReturn
     }
     
-    @objc public func write(_ data: Data!) -> Bool {
+    /// ObjC protocol `writeData:` imports to Swift as `write(_:)` (Swift 3 Data rename).
+    /// Selector seen from BLEBridge remains `writeData:`.
+    @objc public func write(_ data: Data) -> Bool {
         guard let peripheral = self.peripheral,
-              let characteristic = self.writeCharacteristic else { return false }
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+              let characteristic = self.writeCharacteristic,
+              !data.isEmpty else {
+            logError("write: missing peripheral/characteristic or empty payload")
+            return false
+        }
+        let type: CBCharacteristicWriteType =
+            characteristic.properties.contains(.writeWithoutResponse)
+            ? .withoutResponse
+            : .withResponse
+        // BLE default ATT payload is 20 bytes; HDLC already chunks to 20 for Suunto,
+        // but defend against larger writes from other families.
+        let maxChunk = 20
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + maxChunk, data.count)
+            let chunk = data.subdata(in: offset..<end)
+            peripheral.writeValue(chunk, for: characteristic, type: type)
+            offset = end
+        }
         return true
     }
     
@@ -376,7 +411,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         if peripheral.state == .connected {
             self.isPeripheralReady = true
             self.connectedDevice = peripheral
-            logInfo("connect(toDevice:): already connected \(peripheral.name ?? address)")
+            logInfo("connect(toDevice:): already connected \(peripheral.name ?? address ?? "?")")
             return true
         }
         centralManager.connect(peripheral, options: [
@@ -656,6 +691,35 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 continue
             }
             guard let characteristics = service.characteristics else { continue }
+
+            let serviceKey = service.uuid.uuidString.lowercased()
+            let knownChars = knownSerialCharacteristics.first {
+                $0.service.lowercased() == serviceKey
+            }
+
+            if let knownChars {
+                for characteristic in characteristics {
+                    let uuid = characteristic.uuid.uuidString.lowercased()
+                    if uuid == knownChars.write.lowercased() {
+                        writeCharacteristic = characteristic
+                    }
+                    if uuid == knownChars.notify.lowercased() {
+                        notifyCharacteristic = characteristic
+                        if !characteristic.isNotifying {
+                            peripheral.setNotifyValue(true, for: characteristic)
+                        }
+                    }
+                }
+                if writeCharacteristic != nil && notifyCharacteristic != nil {
+                    preferredService = service
+                    logInfo(
+                        "assignCharacteristics: matched known UUIDs for \(serviceKey) write=\(knownChars.write) notify=\(knownChars.notify)"
+                    )
+                    break
+                }
+                // Fall through to property matching if UUIDs not present yet.
+            }
+
             for characteristic in characteristics {
                 if isWriteCharacteristic(characteristic) {
                     writeCharacteristic = characteristic

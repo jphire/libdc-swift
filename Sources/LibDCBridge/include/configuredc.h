@@ -137,6 +137,9 @@ char* get_formatted_device_name(const char *name);
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, 
     dc_family_t family, unsigned int model);
 
+/** Human-readable stage of the last failed BLE open (empty on success). */
+const char *get_last_ble_open_stage(void);
+
 /**
  * Reopens a device with a different model, reusing the existing BLE connection
  * @param data: Device data structure (must have valid context and iostream)

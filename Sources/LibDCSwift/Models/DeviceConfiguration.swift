@@ -284,7 +284,9 @@ import LibDCBridge
             return true
         }
 
-        let detail = "open failed status=\(status) (\(resolvedLabel))"
+        let stage = get_last_ble_open_stage().map { String(cString: $0) } ?? ""
+        let stagePart = stage.isEmpty ? "" : " stage=\(stage)"
+        let detail = "open failed status=\(status) (\(resolvedLabel))\(stagePart)"
         lastOpenError = detail
         logError("Failed to open device: \(detail)")
         if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {

@@ -183,6 +183,21 @@ static dc_status_t ble_stream_close(dc_iostream_t *iostream)
 /*--------------------------------------------------------------------
  * Opens a BLE packet connection to a dive computer
  *------------------------------------------------------------------*/
+/* Last open failure stage for host apps (Metro / Connect logs). */
+static char g_last_ble_open_stage[160] = "";
+
+const char *get_last_ble_open_stage(void) {
+    return g_last_ble_open_stage;
+}
+
+static void set_last_ble_open_stage(const char *stage) {
+    if (!stage) {
+        g_last_ble_open_stage[0] = '\0';
+        return;
+    }
+    snprintf(g_last_ble_open_stage, sizeof(g_last_ble_open_stage), "%s", stage);
+}
+
 dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, const char *devaddr, void *userdata) {
     // Initialize the Swift BLE manager singletons
     initializeBLEManager();
@@ -191,12 +206,14 @@ dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, con
     ble_object_t *io = createBLEObject();
     if (io == NULL) {
         printf("ble_packet_open: Failed to create BLE object\n");
+        set_last_ble_open_stage("ble_packet_open: no memory");
         return DC_STATUS_NOMEMORY;
     }
 
     // Connect to the device
     if (!connectToBLEDevice(io, devaddr)) {
         printf("ble_packet_open: Failed to connect to device\n");
+        set_last_ble_open_stage("ble_packet_open: connect/discover/notify failed");
         freeBLEObject(io);
         return DC_STATUS_IO;
     }
@@ -205,6 +222,7 @@ dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, con
     dc_status_t status = ble_iostream_create(iostream, context, io);
     if (status != DC_STATUS_SUCCESS) {
         printf("ble_packet_open: Failed to create iostream\n");
+        set_last_ble_open_stage("ble_packet_open: iostream create failed");
         freeBLEObject(io);
         return status;
     }
@@ -310,7 +328,9 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     dc_status_t rc;
     dc_descriptor_t *descriptor = NULL;
 
+    set_last_ble_open_stage("");
     if (!data || !devaddr) {
+        set_last_ble_open_stage("open_ble_device: invalid args");
         return DC_STATUS_INVALIDARGS;
     }
 
@@ -321,6 +341,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = dc_context_new(&data->context);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to create context, rc=%d\n", rc);
+        set_last_ble_open_stage("open_ble_device: context_new failed");
         return rc;
     }
 
@@ -328,6 +349,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = find_descriptor_by_model(&descriptor, family, model);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to find descriptor, rc=%d\n", rc);
+        set_last_ble_open_stage("open_ble_device: descriptor not found");
         close_device_data(data);
         return rc;
     }
@@ -336,19 +358,23 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = ble_packet_open(&data->iostream, data->context, devaddr, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open BLE connection, rc=%d\n", rc);
+        /* stage already set inside ble_packet_open */
         close_device_data(data);
         return rc;
     }
 
-    /* BLE devices often need a few seconds after "peripheral ready" before they accept protocol. */
-    printf("Waiting 4s for device to be ready for protocol...\n");
-    (void) dc_iostream_sleep(data->iostream, 4000);
+    /* BLE devices often need a moment after notifications before they accept protocol. */
+    printf("Waiting 2s for device to be ready for protocol...\n");
+    (void) dc_iostream_sleep(data->iostream, 2000);
 
     printf("DC_IO: starting device protocol (dc_device_open / CMD_INIT)...\n");
     // Use dc_device_open to handle device-specific opening
     rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open device, rc=%d\n", rc);
+        char buf[160];
+        snprintf(buf, sizeof(buf), "dc_device_open/CMD_INIT failed rc=%d", (int)rc);
+        set_last_ble_open_stage(buf);
         /* Library (e.g. suunto_eonsteel) may have already closed the iostream on failure;
          * avoid double-close / double-free by not closing it again. */
         data->iostream = NULL;
