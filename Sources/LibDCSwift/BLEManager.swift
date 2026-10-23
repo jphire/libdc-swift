@@ -146,21 +146,58 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             logError("Peripheral not in connected state: \(peripheral.state.rawValue)")
             return false
         }
-        
-        peripheral.discoverServices(nil)
+
+        // Reuse characteristics from a prior discovery on this GATT link.
+        if writeCharacteristic != nil && notifyCharacteristic != nil {
+            logInfo("discoverServices: reusing existing write/notify characteristics")
+            return true
+        }
+
+        // Prefer discovering only known dive-computer serial services (faster, avoids wrong chars).
+        let knownUUIDs = knownSerialServices.map { CBUUID(string: $0.uuid) }
+        if let services = peripheral.services, !services.isEmpty {
+            assignCharacteristics(from: services, peripheral: peripheral)
+            if writeCharacteristic != nil && notifyCharacteristic != nil {
+                logInfo("discoverServices: characteristics already cached on services")
+                return true
+            }
+            for service in services where !isExcludedService(service.uuid) {
+                if isKnownSerialService(service.uuid) != nil || preferredService == nil {
+                    peripheral.discoverCharacteristics(nil, for: service)
+                }
+            }
+        } else {
+            // First try known serial UUIDs; fall back to full discovery on timeout.
+            peripheral.discoverServices(knownUUIDs)
+        }
         
         // Wait for characteristics with timeout. CB central uses the main queue, so
         // always pump RunLoop.main (not RunLoop.current) even if called off-main.
-        let timeout = Date(timeIntervalSinceNow: 5.0)
+        var didFallbackDiscoverAll = false
+        let started = Date()
+        let timeout = Date(timeIntervalSinceNow: 15.0)
         while writeCharacteristic == nil || notifyCharacteristic == nil {
             if Date() > timeout {
-                logError("Timeout waiting for service discovery")
+                logError(
+                    "Timeout waiting for service discovery (services=\(peripheral.services?.count ?? -1) write=\(self.writeCharacteristic != nil) notify=\(self.notifyCharacteristic != nil))"
+                )
                 return false
+            }
+            // If known-UUID discovery returned nothing useful, widen the search once.
+            if !didFallbackDiscoverAll,
+               Date().timeIntervalSince(started) > 4.0,
+               peripheral.services == nil || peripheral.services?.isEmpty == true {
+                didFallbackDiscoverAll = true
+                logWarning("discoverServices: falling back to discoverServices(nil)")
+                peripheral.discoverServices(nil)
             }
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         }
-        
-        return writeCharacteristic != nil && notifyCharacteristic != nil
+
+        logInfo(
+            "discoverServices: write=\(self.writeCharacteristic?.uuid.uuidString ?? "?") notify=\(self.notifyCharacteristic?.uuid.uuidString ?? "?")"
+        )
+        return true
     }
     
     @objc(enableNotifications)
@@ -176,11 +213,15 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             logError("Peripheral not in connected state for notifications: \(peripheral.state.rawValue)")
             return false
         }
+
+        if notifyCharacteristic.isNotifying {
+            return true
+        }
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
         
         // Wait for notifications to be enabled with timeout (main run loop — see discoverServices).
-        let timeout = Date(timeIntervalSinceNow: 5.0)
+        let timeout = Date(timeIntervalSinceNow: 15.0)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
                 logError("Timeout waiting for notifications to enable")
@@ -227,7 +268,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @objc public func readDataPartial(_ requested: Int32) -> Data? {
         let requestedInt = Int(requested)
         let startTime = Date()
-        let timeout: TimeInterval = 3.0
+        // Suunto CMD_INIT / HDLC often needs >3s for the first reply after open.
+        let timeout: TimeInterval = 8.0
 
         while Date().timeIntervalSince(startTime) < timeout {
             var outData: Data?
@@ -255,11 +297,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     // MARK: - Device Management
-    @objc public func close(clearDevicePtr: Bool = false) {
-        isDisconnecting = true
-        DispatchQueue.main.async {
-            self.isPeripheralReady = false
-            self.connectedDevice = nil
+    /// Release protocol / I/O state. By default keeps the GATT link so RescuePro can retry
+    /// open/download without re-pairing (Connect-style descriptor open on an existing link).
+    @objc public func close(clearDevicePtr: Bool = false, disconnectPeripheral: Bool = false) {
+        if disconnectPeripheral {
+            isDisconnecting = true
         }
         queue.sync {
             if !receivedData.isEmpty {
@@ -282,16 +324,23 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 self.openedDeviceDataPtr = nil
             }
         }
-        
-        if let peripheral = self.peripheral {
-            self.writeCharacteristic = nil
-            self.notifyCharacteristic = nil
-            self.peripheral = nil
-            centralManager.cancelPeripheralConnection(peripheral)
-        }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.isDisconnecting = false
+
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        preferredService = nil
+
+        if disconnectPeripheral {
+            DispatchQueue.main.async {
+                self.isPeripheralReady = false
+                self.connectedDevice = nil
+            }
+            if let peripheral = self.peripheral {
+                self.peripheral = nil
+                centralManager.cancelPeripheralConnection(peripheral)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.isDisconnecting = false
+            }
         }
     }
     
@@ -526,18 +575,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             logWarning("No services found")
             return
         }
-        
-        for service in services {
-            if isExcludedService(service.uuid) {
-                continue
-            }
-            
-            if let knownService = isKnownSerialService(service.uuid) {
+
+        // Prefer known serial services only (Suunto/Shearwater/…).
+        let known = services.filter { isKnownSerialService($0.uuid) != nil }
+        let targets = known.isEmpty
+            ? services.filter { !isExcludedService($0.uuid) }
+            : known
+
+        for service in targets {
+            if isKnownSerialService(service.uuid) != nil {
                 preferredService = service
-                writeCharacteristic = nil
-                notifyCharacteristic = nil
             }
-            peripheral.discoverCharacteristics(nil, for: service)
+            if let chars = service.characteristics, !chars.isEmpty {
+                assignCharacteristics(from: [service], peripheral: peripheral)
+            } else {
+                peripheral.discoverCharacteristics(nil, for: service)
+            }
         }
     }
 
@@ -546,22 +599,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             logError("Error discovering characteristics: \(error.localizedDescription)")
             return
         }
-        
-        guard let characteristics = service.characteristics else {
-            logWarning("No characteristics found for service: \(service.uuid)")
-            return
-        }
-        
-        for characteristic in characteristics {
-            if isWriteCharacteristic(characteristic) {
-                writeCharacteristic = characteristic
-            }
-            
-            if isReadCharacteristic(characteristic) {
-                notifyCharacteristic = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
-            }
-        }
+        assignCharacteristics(from: [service], peripheral: peripheral)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -598,6 +636,46 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
 
     // MARK: - Private Helpers
+    /// Assign write/notify only from known dive-computer serial services when possible.
+    private func assignCharacteristics(from services: [CBService], peripheral: CBPeripheral) {
+        let ordered: [CBService]
+        if let preferred = preferredService, services.contains(where: { $0.uuid == preferred.uuid }) {
+            ordered = [preferred] + services.filter { $0.uuid != preferred.uuid }
+        } else {
+            let known = services.filter { isKnownSerialService($0.uuid) != nil }
+            ordered = known.isEmpty ? services : known
+        }
+
+        for service in ordered {
+            if isExcludedService(service.uuid) { continue }
+            // Once we have a known serial service, ignore other services' chars.
+            if preferredService != nil,
+               isKnownSerialService(service.uuid) == nil,
+               writeCharacteristic != nil,
+               notifyCharacteristic != nil {
+                continue
+            }
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics {
+                if isWriteCharacteristic(characteristic) {
+                    writeCharacteristic = characteristic
+                }
+                if isReadCharacteristic(characteristic) {
+                    notifyCharacteristic = characteristic
+                    if !characteristic.isNotifying {
+                        peripheral.setNotifyValue(true, for: characteristic)
+                    }
+                }
+            }
+            if isKnownSerialService(service.uuid) != nil,
+               writeCharacteristic != nil,
+               notifyCharacteristic != nil {
+                preferredService = service
+                break
+            }
+        }
+    }
+
     private func updateTransferStats(_ newBytes: Int) {
         totalBytesReceived += newBytes
         
@@ -632,8 +710,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                characteristic.properties.contains(.indicate)
     }
 
+    /// ObjC / LibDCBridge entry — soft close (keep GATT). Use disconnectPeripheral for user disconnect.
     @objc public func close() {
-        close(clearDevicePtr: false)
+        close(clearDevicePtr: false, disconnectPeripheral: false)
     }
 }
 

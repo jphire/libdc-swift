@@ -52,6 +52,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     // Final check if we're actually ready
     if (![manager getPeripheralReadyState]) {
         NSLog(@"Timeout waiting for peripheral to be ready");
+        // Soft close — keep GATT so the host app can retry open without re-pairing.
         [manager close];
         return false;
     }
@@ -69,7 +70,8 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
         [manager close];
         return false;
     }
-    
+
+    NSLog(@"connectToBLEDevice: GATT ready, services + notifications OK");
     return true;
 }
 
@@ -111,7 +113,11 @@ dc_status_t ble_ioctl(ble_object_t *io, unsigned int request, void *data, size_t
 }
 
 dc_status_t ble_sleep(ble_object_t *io, unsigned int milliseconds) {
-    [NSThread sleepForTimeInterval:milliseconds / 1000.0];
+    // Pump main run loop so CoreBluetooth (main-queue) callbacks still run.
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:milliseconds / 1000.0];
+    while ([[NSDate date] compare:end] == NSOrderedAscending) {
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
     return DC_STATUS_SUCCESS;
 }
 

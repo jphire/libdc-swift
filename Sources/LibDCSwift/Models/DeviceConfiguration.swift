@@ -201,19 +201,23 @@ import LibDCBridge
         return knownServiceUUIDs
     }
 
+    /// Last open failure detail (dc_status + stage), for UI / Metro logs.
+    public static var lastOpenError: String?
+
     /// Attempts to open a BLE connection to a dive computer.
+    /// Pass `forcedModel` (like Connect's descriptor picker) so the correct
+    /// libdivecomputer driver is used (e.g. Suunto EON Core → family eonsteel, model 1).
     public static func openBLEDevice(
         name: String,
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
+        lastOpenError = nil
         logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
-        // Set connecting flag to prevent auto-reconnect during connection attempt
-        DispatchQueue.main.async {
-            if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
-                manager.isConnecting = true
-            }
+        // Sync — open pumps RunLoop.main and must see isConnecting immediately.
+        if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
+            manager.isConnecting = true
         }
 
         var deviceData: UnsafeMutablePointer<device_data_t>?
@@ -223,25 +227,31 @@ import LibDCBridge
             logDebug("Found stored device configuration - Family: \(storedDevice.family), Model: \(storedDevice.model)")
         }
 
-        // Determine which configuration to use: Forced > Stored > Auto-detect from name > Default(0)
+        // Forced > name detect > stored > default. Prefer name over stale stored
+        // so a wrong saved model cannot block the correct libdc protocol.
         let familyToUse: dc_family_t
         let modelToUse: UInt32
+        let resolvedLabel: String
 
         if let forced = forcedModel {
             familyToUse = forced.family.asDCFamily
             modelToUse = forced.model
+            resolvedLabel = "forced \(forced.family) model \(forced.model)"
             logInfo("Using forced configuration: \(forced.family) Model: \(forced.model)")
+        } else if let detected = fromName(name) {
+            familyToUse = detected.family.asDCFamily
+            modelToUse = detected.model
+            resolvedLabel = "name '\(name)' → \(detected.family) model \(detected.model)"
+            logInfo("Auto-detected configuration from name '\(name)': \(detected.family) Model: \(detected.model)")
         } else if let stored = storedDevice {
             familyToUse = stored.family.asDCFamily
             modelToUse = stored.model
-        } else if let detected = fromName(name) {
-            // Auto-detect from device name BEFORE opening
-            familyToUse = detected.family.asDCFamily
-            modelToUse = detected.model
-            logInfo("Auto-detected configuration from name '\(name)': \(detected.family) Model: \(detected.model)")
+            resolvedLabel = "stored \(stored.family) model \(stored.model)"
+            logInfo("Using stored configuration: \(stored.family) Model: \(stored.model)")
         } else {
             familyToUse = DC_FAMILY_NULL
             modelToUse = 0
+            resolvedLabel = "defaults (unknown name '\(name)')"
             logWarning("⚠️ Could not determine device configuration for '\(name)', opening with defaults")
         }
 
@@ -254,41 +264,31 @@ import LibDCBridge
         )
 
         if status == DC_STATUS_SUCCESS, let data = deviceData {
-            logDebug("Successfully opened device")
+            logDebug("Successfully opened device (\(resolvedLabel))")
             logDebug("Device data pointer allocated at: \(String(describing: data))")
 
-            // Store the configuration for future connections
-            if let forced = forcedModel {
+            if let resolved = forcedModel ?? fromName(name),
+               storedDevice == nil || forcedModel != nil {
                 DeviceStorage.shared.storeDevice(
                     uuid: deviceAddress,
                     name: name,
-                    family: forced.family,
-                    model: forced.model
-                )
-            } else if storedDevice == nil, let detected = fromName(name) {
-                DeviceStorage.shared.storeDevice(
-                    uuid: deviceAddress,
-                    name: name,
-                    family: detected.family,
-                    model: detected.model
+                    family: resolved.family,
+                    model: resolved.model
                 )
             }
 
-            DispatchQueue.main.async {
-                if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
-                    manager.openedDeviceDataPtr = data
-                    manager.isConnecting = false // Clear connecting flag on success
-                }
+            if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
+                manager.openedDeviceDataPtr = data
+                manager.isConnecting = false
             }
             return true
         }
 
-        logError("Failed to open device (status: \(status))")
-        // Clear connecting flag on failure
-        DispatchQueue.main.async {
-            if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
-                manager.isConnecting = false
-            }
+        let detail = "open failed status=\(status) (\(resolvedLabel))"
+        lastOpenError = detail
+        logError("Failed to open device: \(detail)")
+        if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
+            manager.isConnecting = false
         }
         if let data = deviceData {
             data.deallocate()
@@ -403,6 +403,26 @@ import LibDCBridge
                 return (deviceFamily, model)
             }
             dc_descriptor_free(desc)
+        }
+        // Swift catalog fallback (e.g. "EON Core 2051…" ↔ "Suunto EON Core").
+        let lower = name.lowercased()
+        let matches = supportedModels
+            .filter { model in
+                let catalog = model.name.lowercased()
+                let withoutVendor = catalog
+                    .replacingOccurrences(of: "suunto ", with: "")
+                    .replacingOccurrences(of: "shearwater ", with: "")
+                    .replacingOccurrences(of: "scubapro ", with: "")
+                    .replacingOccurrences(of: "mares ", with: "")
+                    .replacingOccurrences(of: "cressi ", with: "")
+                return lower.contains(catalog)
+                    || catalog.contains(lower)
+                    || lower.contains(withoutVendor)
+                    || withoutVendor.contains(lower)
+            }
+            .sorted { $0.name.count > $1.name.count }
+        if let best = matches.first {
+            return (best.family, best.modelID)
         }
         return nil
     }
