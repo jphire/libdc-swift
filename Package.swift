@@ -12,9 +12,10 @@ let package = Package(
             name: "LibDCSwift",
             targets: ["LibDCSwift"]
         ),
+        // Static (default) — required for Expo/RN apps that cannot use use_frameworks! :dynamic
+        // (Mapbox + Expo precompiled pods are static; dynamic LibDCBridge breaks EAS pod install).
         .library(
             name: "LibDCBridge",
-            type: .dynamic,
             targets: ["LibDCBridge"]
         ),
         .library(
