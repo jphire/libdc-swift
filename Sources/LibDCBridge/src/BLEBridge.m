@@ -1,4 +1,5 @@
 #import "BLEBridge.h"
+#import "configuredc.h"
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 
@@ -21,9 +22,15 @@ void freeBLEObject(ble_object_t* obj) {
     }
 }
 
+static void ble_fail_stage(const char *stage) {
+    NSLog(@"%s", stage);
+    set_last_ble_open_stage(stage);
+}
+
 bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     if (!io || !deviceAddress) {
         NSLog(@"Invalid parameters passed to connectToBLEDevice");
+        ble_fail_stage("ble_packet_open: invalid args");
         return false;
     }
     
@@ -34,6 +41,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     bool success = [manager connectToDevice:address];
     if (!success) {
         NSLog(@"Failed to connect to device");
+        ble_fail_stage("ble_packet_open: connectToDevice failed");
         return false;
     }
     
@@ -52,6 +60,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     // Final check if we're actually ready
     if (![manager getPeripheralReadyState]) {
         NSLog(@"Timeout waiting for peripheral to be ready");
+        ble_fail_stage("ble_packet_open: peripheral ready timeout");
         // Soft close — keep GATT so the host app can retry open without re-pairing.
         [manager close];
         return false;
@@ -60,6 +69,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     success = [manager discoverServices];
     if (!success) {
         NSLog(@"Service discovery failed");
+        ble_fail_stage("ble_packet_open: discoverServices failed");
         [manager close];
         return false;
     }
@@ -67,6 +77,7 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
     success = [manager enableNotifications];
     if (!success) {
         NSLog(@"Failed to enable notifications");
+        ble_fail_stage("ble_packet_open: enableNotifications failed");
         [manager close];
         return false;
     }

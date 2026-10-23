@@ -169,21 +169,33 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             return true
         }
 
-        // Prefer discovering only known dive-computer serial services (faster, avoids wrong chars).
         let knownUUIDs = knownSerialServices.map { CBUUID(string: $0.uuid) }
-        if let services = peripheral.services, !services.isEmpty {
-            assignCharacteristics(from: services, peripheral: peripheral)
+        let cached = peripheral.services ?? []
+        let hasKnownSerial = cached.contains { isKnownSerialService($0.uuid) != nil }
+
+        if hasKnownSerial {
+            assignCharacteristics(from: cached, peripheral: peripheral)
             if writeCharacteristic != nil && notifyCharacteristic != nil {
-                logInfo("discoverServices: characteristics already cached on services")
+                logInfo("discoverServices: characteristics already cached on known serial service")
                 return true
             }
-            for service in services where !isExcludedService(service.uuid) {
-                if isKnownSerialService(service.uuid) != nil || preferredService == nil {
+            for service in cached where isKnownSerialService(service.uuid) != nil {
+                preferredService = service
+                if service.characteristics == nil || service.characteristics?.isEmpty == true {
                     peripheral.discoverCharacteristics(nil, for: service)
+                } else {
+                    assignCharacteristics(from: [service], peripheral: peripheral)
                 }
             }
         } else {
-            // First try known serial UUIDs; fall back to full discovery on timeout.
+            // iOS often caches GAP/GATT on an already-connected peripheral *without*
+            // the vendor serial service. Do not only dig into those — rediscover known UUIDs.
+            logInfo(
+                "discoverServices: no known serial in cache (services=\(cached.count)) — discoverServices(known)"
+            )
+            writeCharacteristic = nil
+            notifyCharacteristic = nil
+            preferredService = nil
             peripheral.discoverServices(knownUUIDs)
         }
         
@@ -199,13 +211,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 )
                 return false
             }
-            // If known-UUID discovery returned nothing useful, widen the search once.
-            if !didFallbackDiscoverAll,
-               Date().timeIntervalSince(started) > 4.0,
-               peripheral.services == nil || peripheral.services?.isEmpty == true {
-                didFallbackDiscoverAll = true
-                logWarning("discoverServices: falling back to discoverServices(nil)")
-                peripheral.discoverServices(nil)
+            // Widen search if known-UUID discovery still found nothing useful.
+            if !didFallbackDiscoverAll, Date().timeIntervalSince(started) > 4.0 {
+                let stillNoSerial = !(peripheral.services ?? []).contains {
+                    isKnownSerialService($0.uuid) != nil
+                }
+                if stillNoSerial {
+                    didFallbackDiscoverAll = true
+                    logWarning("discoverServices: falling back to discoverServices(nil)")
+                    peripheral.discoverServices(nil)
+                }
             }
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         }

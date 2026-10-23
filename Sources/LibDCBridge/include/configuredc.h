@@ -140,6 +140,9 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr,
 /** Human-readable stage of the last failed BLE open (empty on success). */
 const char *get_last_ble_open_stage(void);
 
+/** Set by BLEBridge / ble_packet_open on failure stages (for Metro / Connect logs). */
+void set_last_ble_open_stage(const char *stage);
+
 /**
  * Reopens a device with a different model, reusing the existing BLE connection
  * @param data: Device data structure (must have valid context and iostream)

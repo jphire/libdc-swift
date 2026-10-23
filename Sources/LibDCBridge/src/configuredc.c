@@ -190,7 +190,7 @@ const char *get_last_ble_open_stage(void) {
     return g_last_ble_open_stage;
 }
 
-static void set_last_ble_open_stage(const char *stage) {
+void set_last_ble_open_stage(const char *stage) {
     if (!stage) {
         g_last_ble_open_stage[0] = '\0';
         return;
@@ -201,6 +201,7 @@ static void set_last_ble_open_stage(const char *stage) {
 dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, const char *devaddr, void *userdata) {
     // Initialize the Swift BLE manager singletons
     initializeBLEManager();
+    set_last_ble_open_stage("");
 
     // Create a BLE object
     ble_object_t *io = createBLEObject();
@@ -210,10 +211,13 @@ dc_status_t ble_packet_open(dc_iostream_t **iostream, dc_context_t *context, con
         return DC_STATUS_NOMEMORY;
     }
 
-    // Connect to the device
+    // Connect to the device (connectToBLEDevice sets a granular stage on failure)
     if (!connectToBLEDevice(io, devaddr)) {
-        printf("ble_packet_open: Failed to connect to device\n");
-        set_last_ble_open_stage("ble_packet_open: connect/discover/notify failed");
+        printf("ble_packet_open: Failed to connect to device (%s)\n",
+               g_last_ble_open_stage[0] ? g_last_ble_open_stage : "unknown");
+        if (g_last_ble_open_stage[0] == '\0') {
+            set_last_ble_open_stage("ble_packet_open: connect/discover/notify failed");
+        }
         freeBLEObject(io);
         return DC_STATUS_IO;
     }
