@@ -471,10 +471,12 @@ static const struct name_pattern name_patterns[] = {
     { "NERD", "Shearwater", "NERD", MATCH_EXACT },
     { "Tern", "Shearwater", "Tern", MATCH_EXACT },
     
-    // Suunto dive computers
-    { "EON Steel", "Suunto", "EON Steel", MATCH_EXACT },
-    { "Suunto D5", "Suunto", "D5", MATCH_EXACT },
-    { "EON Core", "Suunto", "EON Core", MATCH_EXACT },
+    // Suunto dive computers (BLE name often includes serial, e.g. "EON Core 2051100734")
+    { "EON Steel Black", "Suunto", "EON Steel Black", MATCH_CONTAINS },
+    { "EON Steel", "Suunto", "EON Steel", MATCH_CONTAINS },
+    { "Suunto D5", "Suunto", "D5", MATCH_CONTAINS },
+    { "EON Core", "Suunto", "EON Core", MATCH_CONTAINS },
+    { "D5", "Suunto", "D5", MATCH_PREFIX },
     
     // Scubapro dive computers
     { "G2", "Scubapro", "G2", MATCH_EXACT },
@@ -657,13 +659,15 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     unsigned int model;
     dc_status_t rc;
     
-    // Try stored configuration first if provided
-    if (stored_family != DC_FAMILY_NULL && stored_model != 0) {
+    // Try stored/identified configuration first if family is known.
+    // Note: some models use model id 0 (e.g. Suunto EON Steel) — do not require model != 0.
+    if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;
             return DC_STATUS_SUCCESS;
         }
+        printf("open_ble_device with provided family/model failed rc=%d — falling back to name ID\n", rc);
     }
     
     // Fall back to identification if stored config failed or wasn't provided

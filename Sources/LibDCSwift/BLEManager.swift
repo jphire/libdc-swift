@@ -149,14 +149,15 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         peripheral.discoverServices(nil)
         
-        // Wait for characteristics with timeout
+        // Wait for characteristics with timeout. CB central uses the main queue, so
+        // always pump RunLoop.main (not RunLoop.current) even if called off-main.
         let timeout = Date(timeIntervalSinceNow: 5.0)
         while writeCharacteristic == nil || notifyCharacteristic == nil {
             if Date() > timeout {
                 logError("Timeout waiting for service discovery")
                 return false
             }
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         }
         
         return writeCharacteristic != nil && notifyCharacteristic != nil
@@ -178,14 +179,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
         
-        // Wait for notifications to be enabled with timeout
+        // Wait for notifications to be enabled with timeout (main run loop — see discoverServices).
         let timeout = Date(timeIntervalSinceNow: 5.0)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
                 logError("Timeout waiting for notifications to enable")
                 return false
             }
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         }
         
         return notifyCharacteristic.isNotifying
@@ -307,14 +308,32 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
-        guard let uuid = UUID(uuidString: address),
-              let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+        guard let uuid = UUID(uuidString: address) else {
+            return false
+        }
+        // Prefer an already-discovered peripheral (same scan session), then system cache.
+        let peripheral =
+            discoveredPeripherals.first(where: { $0.identifier == uuid })
+            ?? centralManager.retrievePeripherals(withIdentifiers: [uuid]).first
+        guard let peripheral else {
+            logError("connect(toDevice:): peripheral \(address ?? "?") not in discovered list or CB cache")
             return false
         }
         
         self.peripheral = peripheral
         peripheral.delegate = self
-        centralManager.connect(peripheral, options: nil)
+        // Reuse an existing GATT link (RescuePro connects before LibDC open).
+        // Set ready synchronously — open waits on the main run loop and must see this immediately.
+        if peripheral.state == .connected {
+            self.isPeripheralReady = true
+            self.connectedDevice = peripheral
+            logInfo("connect(toDevice:): already connected \(peripheral.name ?? address)")
+            return true
+        }
+        centralManager.connect(peripheral, options: [
+            CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
+        ])
         return true  // Return immediately, connection status will be handled by delegate
     }
     
