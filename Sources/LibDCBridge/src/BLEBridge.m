@@ -45,16 +45,15 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
         return false;
     }
     
-    // Wait for connection to complete by checking peripheral ready state
-    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0]; // 10 second timeout
+    // Wait for connection. CB callbacks use a dedicated queue — sleep, don't pump
+    // the main run loop (deadlocks when already on DispatchQueue.main).
+    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
     while ([[NSDate date] compare:timeout] == NSOrderedAscending) {
-        // Check if peripheral is ready using protocol method
         if ([manager getPeripheralReadyState]) {
             NSLog(@"Peripheral is ready for communication");
             break;
         }
-        // Small sleep to avoid busy-waiting
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        usleep(50000); /* 50ms */
     }
     
     // Final check if we're actually ready

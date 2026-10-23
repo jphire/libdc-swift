@@ -73,6 +73,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     private var notifyCharacteristic: CBCharacteristic?
     private var receivedData: Data = Data()
     private let queue = DispatchQueue(label: "com.blemanager.queue")
+    /// Dedicated CB callback queue — never use the main queue.
+    /// RescuePro (and others) open protocol from `DispatchQueue.main.async`; if CB
+    /// also uses main, `discoverServices` RunLoop-waits deadlock and time out (-6).
+    private let cbQueue = DispatchQueue(label: "com.libdcswift.corebluetooth")
     private let dataAvailableSemaphore = DispatchSemaphore(value: 0) // Signals when new data arrives
     private let frameMarker: UInt8 = 0x7E
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
@@ -98,6 +102,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// - Returns: True if device data pointer exists
     public func hasValidDeviceDataPtr() -> Bool {
         return openedDeviceDataPtr != nil
+    }
+
+    /// Sleep-wait so CB callbacks on `cbQueue` can run (safe from main or background).
+    private func waitBrieflyForCallbacks() {
+        Thread.sleep(forTimeInterval: 0.05)
     }
     
     // MARK: - Serial Services
@@ -141,7 +150,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     // MARK: - Initialization
     private override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        centralManager = CBCentralManager(delegate: self, queue: cbQueue)
     }
     
     // MARK: - Service Discovery
@@ -199,8 +208,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             peripheral.discoverServices(knownUUIDs)
         }
         
-        // Wait for characteristics with timeout. CB central uses the main queue, so
-        // always pump RunLoop.main (not RunLoop.current) even if called off-main.
+        // Wait for characteristics. Callbacks run on cbQueue — sleep, do not pump
+        // RunLoop.main (deadlocks when caller is already on the main GCD queue).
         var didFallbackDiscoverAll = false
         let started = Date()
         let timeout = Date(timeIntervalSinceNow: 15.0)
@@ -222,7 +231,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                     peripheral.discoverServices(nil)
                 }
             }
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+            waitBrieflyForCallbacks()
         }
 
         logInfo(
@@ -251,14 +260,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
         
-        // Wait for notifications to be enabled with timeout (main run loop — see discoverServices).
         let timeout = Date(timeIntervalSinceNow: 15.0)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
                 logError("Timeout waiting for notifications to enable")
                 return false
             }
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+            waitBrieflyForCallbacks()
         }
         
         return notifyCharacteristic.isNotifying
@@ -336,11 +344,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 return data
             }
 
-            // Must run the run loop so CoreBluetooth delegate (didUpdateValueFor) runs and
-            // appends to receivedData. Blocking on semaphore/sleep on main thread would
-            // prevent the delegate from ever running and we'd never get BLE notifications.
-            let runLoop = Thread.isMainThread ? RunLoop.main : RunLoop.current
-            runLoop.run(until: Date(timeIntervalSinceNow: 0.05))
+            // CB callbacks (didUpdateValueFor) run on cbQueue and signal this semaphore.
+            _ = dataAvailableSemaphore.wait(timeout: .now() + 0.05)
         }
 
         return nil
@@ -560,9 +565,12 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         logInfo("Successfully connected to \(peripheral.name ?? "Unknown Device")")
         peripheral.delegate = self
+        // Set ready on cbQueue first so connectToBLEDevice waiters (sleep) see it
+        // without needing the main run loop.
+        self.isPeripheralReady = true
         DispatchQueue.main.async {
-            self.isPeripheralReady = true
             self.connectedDevice = peripheral
+            self.objectWillChange.send()
         }
     }
 
